@@ -1,0 +1,548 @@
+name: Pipeline Health Monitor
+description: >
+  Semantic model for monitoring Snowflake pipeline health across task execution,
+  warehouse utilization, and query performance. Enables natural language questions
+  about pipeline failures, credit consumption, and operational efficiency.
+
+tables:
+  - name: task_history
+    description: >
+      Historical record of all Snowflake task executions including success,
+      failure, and auto-suspension events. Use this to answer questions about
+      pipeline reliability, failure rates, and execution duration.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: TASK_HISTORY
+    filters:
+      - name: recent_tasks
+        synonyms:
+          - recent runs
+          - last 30 days
+        description: Filters to task runs in the last 30 days
+        expr: SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: task_name
+        synonyms:
+          - pipeline name
+          - job name
+          - task
+        description: The name of the Snowflake task or pipeline
+        expr: NAME
+        data_type: TEXT
+      - name: state
+        synonyms:
+          - status
+          - result
+          - outcome
+        description: >
+          Execution outcome of the task. Possible values are SUCCEEDED, FAILED,
+          FAILED_AND_AUTO_SUSPENDED, SKIPPED, or CANCELLED.
+        expr: STATE
+        data_type: TEXT
+      - name: error_code
+        synonyms:
+          - failure code
+          - error code
+        description: Error code when the task failed
+        expr: ERROR_CODE
+        data_type: TEXT
+      - name: error_message
+        synonyms:
+          - failure reason
+          - error
+          - exception
+        description: Error message when the task failed
+        expr: ERROR_MESSAGE
+        data_type: TEXT
+      - name: query_id
+        synonyms:
+          - query identifier
+          - task query id
+        description: The query ID associated with the task execution
+        expr: QUERY_ID
+        data_type: TEXT
+      - name: root_task_id
+        synonyms:
+          - root task
+          - parent task id
+        description: The ID of the root task in the task graph
+        expr: ROOT_TASK_ID
+        data_type: TEXT
+      - name: run_id
+        synonyms:
+          - run identifier
+          - execution id
+        description: Unique identifier for this task run
+        expr: RUN_ID
+        data_type: NUMBER
+      - name: scheduled_time
+        synonyms:
+          - run time
+          - execution time
+          - when it ran
+        description: The time the task was scheduled to run
+        expr: SCHEDULED_TIME
+        data_type: TIMESTAMP
+      - name: completed_time
+        synonyms:
+          - finish time
+          - end time
+        description: The time the task completed
+        expr: COMPLETED_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: run_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date the task was scheduled to run
+        expr: SCHEDULED_TIME::DATE
+        data_type: DATE
+    measures:
+      - name: total_runs
+        synonyms:
+          - number of runs
+          - run count
+          - executions
+        description: Total number of task executions
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: successful_runs
+        synonyms:
+          - successes
+          - passed runs
+        description: Number of task executions that succeeded
+        expr: COUNT_IF(STATE = 'SUCCEEDED')
+        data_type: NUMBER
+      - name: failed_runs
+        synonyms:
+          - failures
+          - failed executions
+          - errors
+        description: Number of task executions that failed for any reason
+        expr: COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED'))
+        data_type: NUMBER
+      - name: failure_rate
+        synonyms:
+          - error rate
+          - percent failed
+          - reliability
+        description: Percentage of task runs that failed out of total runs
+        expr: ROUND(COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) / NULLIF(COUNT(*), 0) * 100, 2)
+        data_type: NUMBER
+      - name: avg_duration_seconds
+        synonyms:
+          - average run time
+          - average duration
+          - how long tasks take
+        description: Average execution duration in seconds
+        expr: ROUND(AVG(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)), 2)
+        data_type: NUMBER
+      - name: max_duration_seconds
+        synonyms:
+          - longest run
+          - slowest task
+          - maximum duration
+        description: Maximum execution duration in seconds across all runs
+        expr: MAX(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME))
+        data_type: NUMBER
+      - name: auto_suspended_count
+        synonyms:
+          - auto suspended
+          - killed pipelines
+          - suspended tasks
+        description: Number of tasks that failed and were automatically suspended by Snowflake
+        expr: COUNT_IF(STATE = 'FAILED_AND_AUTO_SUSPENDED')
+        data_type: NUMBER
+
+  - name: warehouse_metering
+    description: >
+      Hourly credit consumption by warehouse. Use this to answer questions about
+      cost, credit usage, warehouse efficiency, and identifying expensive or
+      idle warehouses.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: WAREHOUSE_METERING_HISTORY
+    filters:
+      - name: recent_metering
+        synonyms:
+          - recent usage
+          - last 30 days
+        description: Filters to metering data in the last 30 days
+        expr: START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: warehouse_name
+        synonyms:
+          - warehouse
+          - compute cluster
+          - virtual warehouse
+        description: The name of the Snowflake virtual warehouse
+        expr: WAREHOUSE_NAME
+        data_type: TEXT
+      - name: warehouse_id
+        synonyms:
+          - warehouse identifier
+          - warehouse number
+        description: The unique numeric ID of the Snowflake virtual warehouse
+        expr: WAREHOUSE_ID
+        data_type: NUMBER
+      - name: start_time
+        synonyms:
+          - hour
+          - time period
+          - interval start
+        description: The start of the hourly metering interval
+        expr: START_TIME
+        data_type: TIMESTAMP
+      - name: end_time
+        synonyms:
+          - interval end
+          - period end
+        description: The end of the hourly metering interval
+        expr: END_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: metering_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of the metering interval
+        expr: START_TIME::DATE
+        data_type: DATE
+    measures:
+      - name: total_credits
+        synonyms:
+          - credits used
+          - cost
+          - credit consumption
+          - spend
+        description: Total Snowflake credits consumed by the warehouse
+        expr: SUM(CREDITS_USED)
+        data_type: NUMBER
+      - name: compute_credits
+        synonyms:
+          - compute cost
+          - warehouse credits
+        description: Credits used for compute only excluding cloud services
+        expr: SUM(CREDITS_USED_COMPUTE)
+        data_type: NUMBER
+      - name: cloud_service_credits
+        synonyms:
+          - cloud services cost
+          - metadata credits
+        description: Credits used for cloud services like metadata operations
+        expr: SUM(CREDITS_USED_CLOUD_SERVICES)
+        data_type: NUMBER
+      - name: attributed_compute_credits
+        synonyms:
+          - attributed compute
+          - query attributed credits
+        description: Credits attributed to compute queries
+        expr: SUM(CREDITS_ATTRIBUTED_COMPUTE_QUERIES)
+        data_type: NUMBER
+      - name: active_hours
+        synonyms:
+          - hours active
+          - uptime
+          - hours running
+        description: Number of hours the warehouse was active and consuming credits
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: avg_credits_per_hour
+        synonyms:
+          - hourly cost
+          - credit rate
+          - burn rate
+        description: Average credits consumed per active hour
+        expr: ROUND(AVG(CREDITS_USED), 4)
+        data_type: NUMBER
+
+  - name: query_history
+    description: >
+      Detailed history of all queries executed in the account. Use this to answer
+      questions about slow queries, expensive queries, bytes scanned, and
+      query performance trends.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: QUERY_HISTORY
+    filters:
+      - name: recent_queries
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to queries in the last 30 days
+        expr: START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      - name: exclude_system_queries
+        synonyms:
+          - user queries only
+          - exclude internal
+        description: Excludes internal Snowflake system queries
+        expr: QUERY_TYPE NOT IN ('SHOW', 'DESCRIBE', 'USE')
+    dimensions:
+      - name: query_id
+        synonyms:
+          - query identifier
+          - query hash
+          - execution id
+        description: Unique identifier for each query execution
+        expr: QUERY_ID
+        data_type: TEXT
+      - name: warehouse_name
+        synonyms:
+          - warehouse
+          - compute
+        description: The warehouse that executed the query
+        expr: WAREHOUSE_NAME
+        data_type: TEXT
+      - name: warehouse_id
+        synonyms:
+          - warehouse identifier
+          - warehouse number
+        description: The numeric ID of the warehouse that executed the query
+        expr: WAREHOUSE_ID
+        data_type: NUMBER
+      - name: warehouse_size
+        synonyms:
+          - warehouse size
+          - compute size
+          - cluster size
+        description: The size of the warehouse that executed the query
+        expr: WAREHOUSE_SIZE
+        data_type: TEXT
+      - name: query_type
+        synonyms:
+          - operation type
+          - command type
+        description: The type of query such as SELECT, INSERT, or CREATE
+        expr: QUERY_TYPE
+        data_type: TEXT
+      - name: execution_status
+        synonyms:
+          - query status
+          - success or failure
+          - query outcome
+        description: Whether the query succeeded or failed
+        expr: EXECUTION_STATUS
+        data_type: TEXT
+      - name: user_name
+        synonyms:
+          - user
+          - who ran it
+          - executed by
+        description: The user who executed the query
+        expr: USER_NAME
+        data_type: TEXT
+      - name: role_name
+        synonyms:
+          - role
+          - executed as
+        description: The role used to execute the query
+        expr: ROLE_NAME
+        data_type: TEXT
+      - name: database_name
+        synonyms:
+          - database
+          - db
+        description: The database context for the query
+        expr: DATABASE_NAME
+        data_type: TEXT
+      - name: schema_name
+        synonyms:
+          - schema
+        description: The schema context for the query
+        expr: SCHEMA_NAME
+        data_type: TEXT
+      - name: error_code
+        synonyms:
+          - query error code
+          - failure code
+        description: Error code if the query failed
+        expr: ERROR_CODE
+        data_type: TEXT
+      - name: error_message
+        synonyms:
+          - query error
+          - failure reason
+        description: Error message if the query failed
+        expr: ERROR_MESSAGE
+        data_type: TEXT
+      - name: start_time
+        synonyms:
+          - when
+          - query time
+          - execution time
+        description: When the query started executing
+        expr: START_TIME
+        data_type: TIMESTAMP
+      - name: end_time
+        synonyms:
+          - query end
+          - finish time
+        description: When the query finished executing
+        expr: END_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: query_date
+        synonyms:
+          - date
+          - day
+        description: The date the query was executed
+        expr: START_TIME::DATE
+        data_type: DATE
+    measures:
+      - name: total_queries
+        synonyms:
+          - query count
+          - number of queries
+          - executions
+        description: Total number of queries executed
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: avg_duration_seconds
+        synonyms:
+          - average query time
+          - average execution time
+          - how long queries take
+        description: Average query execution time in seconds
+        expr: ROUND(AVG(TOTAL_ELAPSED_TIME) / 1000, 2)
+        data_type: NUMBER
+      - name: max_duration_seconds
+        synonyms:
+          - slowest query
+          - longest query
+          - maximum query time
+        description: Slowest query execution time in seconds
+        expr: ROUND(MAX(TOTAL_ELAPSED_TIME) / 1000, 2)
+        data_type: NUMBER
+      - name: total_gb_scanned
+        synonyms:
+          - data scanned
+          - bytes scanned
+          - data processed
+        description: Total gigabytes of data scanned across all queries
+        expr: ROUND(SUM(BYTES_SCANNED) / 1024 / 1024 / 1024, 2)
+        data_type: NUMBER
+      - name: avg_gb_scanned
+        synonyms:
+          - average data scanned
+          - average bytes per query
+        description: Average gigabytes scanned per query
+        expr: ROUND(AVG(BYTES_SCANNED) / 1024 / 1024 / 1024, 4)
+        data_type: NUMBER
+      - name: failed_queries
+        synonyms:
+          - query failures
+          - errored queries
+          - failed executions
+        description: Number of queries that failed during execution
+        expr: COUNT_IF(EXECUTION_STATUS = 'FAIL')
+        data_type: NUMBER
+      - name: total_credits
+        synonyms:
+          - query cost
+          - credits consumed by queries
+          - cloud service credits
+        description: Total cloud service credits consumed by queries
+        expr: ROUND(SUM(CREDITS_USED_CLOUD_SERVICES), 4)
+        data_type: NUMBER
+      - name: total_rows_produced
+        synonyms:
+          - rows returned
+          - result rows
+        description: Total number of rows produced across all queries
+        expr: SUM(ROWS_PRODUCED)
+        data_type: NUMBER
+      - name: total_partitions_scanned
+        synonyms:
+          - partitions scanned
+          - micro partitions
+        description: Total number of micro-partitions scanned across all queries
+        expr: SUM(PARTITIONS_SCANNED)
+        data_type: NUMBER
+
+verified_queries:
+  - name: task_failure_summary
+    question: Which tasks have the highest failure rate in the last 30 days?
+    sql: |
+      SELECT
+        NAME,
+        COUNT(*) AS total_runs,
+        COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) AS failed_runs,
+        ROUND(COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY NAME
+      ORDER BY failure_rate_pct DESC;
+
+  - name: warehouse_credit_consumption
+    question: How many credits has each warehouse consumed?
+    sql: |
+      SELECT
+        WAREHOUSE_NAME,
+        ROUND(SUM(CREDITS_USED), 4) AS total_credits,
+        COUNT(*) AS active_hours
+      FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY WAREHOUSE_NAME
+      ORDER BY total_credits DESC;
+
+  - name: slowest_tasks
+    question: Which pipelines take the longest to run on average?
+    sql: |
+      SELECT
+        NAME,
+        COUNT(*) AS total_runs,
+        ROUND(AVG(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)), 2) AS avg_duration_seconds,
+        MAX(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)) AS max_duration_seconds
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      AND STATE = 'SUCCEEDED'
+      GROUP BY NAME
+      ORDER BY avg_duration_seconds DESC;
+
+  - name: idle_warehouses
+    question: Which warehouses are underutilized or idle?
+    sql: |
+      SELECT
+        WAREHOUSE_NAME,
+        ROUND(SUM(CREDITS_USED), 4) AS total_credits,
+        COUNT(*) AS active_hours,
+        ROUND(AVG(CREDITS_USED), 4) AS avg_credits_per_hour
+      FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY WAREHOUSE_NAME
+      HAVING total_credits < 1
+      ORDER BY total_credits ASC;
+
+  - name: flaky_pipelines
+    question: Which pipelines are intermittently failing?
+    sql: |
+      SELECT
+        NAME,
+        COUNT_IF(STATE = 'SUCCEEDED') AS successful_runs,
+        COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) AS failed_runs,
+        ROUND(COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY NAME
+      HAVING successful_runs > 0 AND failed_runs > 0
+      ORDER BY failure_rate_pct DESC;
+
+  - name: most_expensive_queries
+    question: Which queries are scanning the most data?
+    sql: |
+      SELECT
+        QUERY_ID,
+        QUERY_TYPE,
+        WAREHOUSE_NAME,
+        ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds,
+        ROUND(BYTES_SCANNED / 1024 / 1024 / 1024, 2) AS gb_scanned
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      ORDER BY gb_scanned DESC
+      LIMIT 20;
