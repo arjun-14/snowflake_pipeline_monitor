@@ -1,120 +1,220 @@
 from __future__ import annotations
 import json
 import re
+import requests
+import _snowflake  # type: ignore  — Snowflake-internal, not resolvable locally
 from typing import Generator
+import pandas as pd
 
-from tools import TOOL_SCHEMAS, TOOL_DISPLAY_NAMES, execute_tool
+from tools import TOOL_DISPLAY_NAMES, execute_tool
 
-# Primary path: Claude models that support native tool calling (tried in order)
-_TOOL_MODELS = ["claude-3-7-sonnet", "claude-3-5-sonnet", "claude-sonnet-4-6"]
-# Fallback synthesis: smaller/faster models are fine for summarisation
-_SYNTHESIS_MODELS = ["llama3.3-70b", "llama3.1-70b", "mistral-large2"]
-MAX_ITERATIONS = 10
+MAX_ITERATIONS = 5
+_SEMANTIC_MODEL = "@PIPELINE_MONITOR.TASKS.CORTEX_STAGE/semantic_model.yaml"
 
-_SYSTEM = """You are a senior Snowflake data platform engineer with deep expertise across the entire data ecosystem. You help teams monitor, diagnose, and optimize their Snowflake environments.
+_SYSTEM = (
+    "You are a senior Snowflake data platform engineer. "
+    "You help teams monitor, diagnose, and optimize their Snowflake environments. "
+    "Always call query_data to fetch live data before answering operational questions. "
+    "query_data retrieves factual metrics only — counts, aggregates, and trends from database tables. "
+    "NEVER call query_data asking for recommendations, optimizations, or suggestions — "
+    "those are your job to synthesize after reviewing the data. "
+    "Available data domains you can query: "
+    "task/pipeline reliability (failure rates, durations, auto-suspensions), "
+    "warehouse credits (total spend, daily trends, idle warehouses), "
+    "query performance (slowest queries, data scanned, cache hits, queue times), "
+    "Snowpipe ingestion (credits, file volumes, daily trends), "
+    "dynamic table refreshes (failure rates, durations), "
+    "COPY bulk loads (success rates, rows loaded). "
+    "Call query_data once per data domain — ask one focused, single-concept factual question per domain. "
+    "Do not combine multiple metrics into one question — ask for the most important metric only. "
+    "Never call query_data multiple times for the same domain. "
+    "For broad health checks, call once per relevant domain. "
+    "Lead with the most critical finding, cite specific numbers from the data, "
+    "and end with 2-3 actionable recommendations. "
+    "If a question is ambiguous, ask a clarifying question before querying."
+)
 
-You have access to seven data skills that query live Snowflake Account Usage data:
-- query_task_health: Pipeline/task execution (TASK_HISTORY)
-- query_warehouse_efficiency: Credit consumption and warehouse cost (WAREHOUSE_METERING_HISTORY)
-- query_performance: Query speed, cache hits, data scanned (QUERY_HISTORY)
-- query_ingestion_health: Snowpipe and COPY INTO operations (PIPE_USAGE_HISTORY + COPY_HISTORY)
-- query_transformation_health: Dynamic table refresh health (DYNAMIC_TABLE_REFRESH_HISTORY)
-- query_cost_breakdown: Cross-domain cost attribution (WAREHOUSE_METERING + DATA_TRANSFER)
-- query_ecosystem_anomalies: Correlated anomaly signals across all domains
+# One tool: natural language → Cortex Analyst → dynamic SQL from semantic model
+_OAI_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_data",
+            "description": (
+                "Query live Snowflake Account Usage data by asking a focused natural language question. "
+                "Internally uses Cortex Analyst with a semantic model covering: task/pipeline execution, "
+                "warehouse credit consumption, query performance, Snowpipe and COPY ingestion, "
+                "dynamic table refresh health, and cost attribution. "
+                "Ask one focused question per call. For broad analysis, call multiple times."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "A specific, focused question about Snowflake data. "
+                            "Examples: 'Which tasks have the highest failure rate in the last 24 hours?', "
+                            "'Which warehouses consumed the most credits this week?', "
+                            "'What are the slowest queries by execution time?'"
+                        ),
+                    }
+                },
+                "required": ["question"],
+            },
+        },
+    }
+]
 
-When answering:
-1. Call the relevant tools first — never answer without data for operational questions
-2. For broad questions ("health check", "what's wrong", "full scan"), call multiple tools
-3. Look for cross-domain correlations (e.g., task failures + warehouse credit spikes together)
-4. Cite specific values from the returned data in your analysis
-5. Lead with the most critical finding, then supporting context
-6. End with 2-3 concrete, actionable recommendations"""
+
+_DOMAIN_LABELS = [
+    (re.compile(r"task|pipeline|job|fail|suspend|scheduled", re.I), "Pipeline Health"),
+    (re.compile(r"warehouse|credit|cost|spend|idle|compute", re.I), "Warehouse Credits"),
+    (re.compile(r"quer(y|ies)|slow|scan|cache|execution", re.I), "Query Performance"),
+    (re.compile(r"pipe|snowpipe|ingest", re.I), "Snowpipe Ingestion"),
+    (re.compile(r"dynamic.table|refresh|upstream|transform", re.I), "Transform Health"),
+    (re.compile(r"copy|load|bulk|row", re.I), "Load Health"),
+]
 
 
-# ── Primary path: Cortex COMPLETE with native tool calling ────────────────────
-
-def _complete_with_tools(session, messages: list[dict]) -> tuple[dict, str]:
-    options = {"temperature": 0, "tools": TOOL_SCHEMAS, "tool_choice": "auto"}
-    for model in _TOOL_MODELS:
-        try:
-            raw = session.sql(
-                "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, PARSE_JSON(?), PARSE_JSON(?))::VARCHAR AS r",
-                params=[model, json.dumps(messages), json.dumps(options)],
-            ).collect()[0]["R"]
-            return json.loads(raw), model
-        except Exception:
-            continue
-    raise RuntimeError(f"No tool-calling model available from: {_TOOL_MODELS}")
+def _skill_label(question: str) -> str:
+    for pattern, label in _DOMAIN_LABELS:
+        if pattern.search(question):
+            return label
+    return "Cortex Analyst"
 
 
-def _run_tool_calling(question: str, session) -> Generator[dict, None, None]:
-    messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": question},
-    ]
-    active_model = _TOOL_MODELS[0]
+# ── Cortex Analyst: natural language → SQL → DataFrame ────────────────────────
+
+def _cortex_analyst(question: str) -> tuple[str, str]:
+    """Calls Cortex Analyst. Returns (sql, description)."""
+    resp = _snowflake.send_snow_api_request(
+        "POST",
+        "/api/v2/cortex/analyst/message",
+        {},
+        {},
+        {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": question}]}],
+            "semantic_model_file": _SEMANTIC_MODEL,
+        },
+        None,
+        30000,
+    )
+
+    if resp["status"] >= 400:
+        raise RuntimeError(f"Cortex Analyst {resp['status']}: {resp['content']}")
+
+    body = json.loads(resp["content"]) if isinstance(resp["content"], str) else resp["content"]
+    blocks = body.get("message", {}).get("content", [])
+
+    sql, description = "", question
+    for block in blocks:
+        if block.get("type") == "sql":
+            sql = block.get("statement", "")
+        elif block.get("type") == "text":
+            description = block.get("text", question)
+
+    if not sql:
+        raise RuntimeError("Cortex Analyst did not return SQL for this question.")
+
+    return sql, description
+
+
+def _execute_analyst_query(question: str, session) -> tuple[pd.DataFrame, str, str]:
+    sql, description = _cortex_analyst(question)
+    df = session.sql(sql).to_pandas()
+    return df, description, sql
+
+
+# ── Cortex Chat Completions primary path ──────────────────────────────────────
+
+def _build_messages(question: str, history: list[dict]) -> list[dict]:
+    messages: list[dict] = [{"role": "system", "content": _SYSTEM}]
+    for msg in history:
+        if msg["role"] == "user":
+            messages.append({"role": "user", "content": msg["content"]})
+        elif msg["role"] == "assistant" and msg.get("answer"):
+            messages.append({"role": "assistant", "content": msg["answer"]})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def _run_chat_completions(question: str, history: list[dict], session) -> Generator[dict, None, None]:
+    messages = _build_messages(question, history)
 
     for _ in range(MAX_ITERATIONS):
-        response, active_model = _complete_with_tools(session, messages)
+        resp = _snowflake.send_snow_api_request(
+            "POST",
+            "/api/v2/cortex/v1/chat/completions",
+            {},
+            {},
+            {"model": "claude-4-sonnet", "messages": messages, "tools": _OAI_TOOLS, "tool_choice": "auto"},
+            None,
+            60000,
+        )
 
-        content: list[dict] = response.get("content", [])
-        stop_reason: str = response.get("stop_reason", "end_turn")
-        tool_blocks = [b for b in content if b.get("type") == "tool_use"]
+        if resp["status"] >= 400:
+            raise RuntimeError(f"Chat Completions {resp['status']}: {resp['content']}")
 
-        if stop_reason == "end_turn" or not tool_blocks:
-            text = "\n\n".join(
-                b.get("text", "") for b in content if b.get("type") == "text"
-            ).strip() or "Analysis complete. See the data above."
-            yield {"type": "answer", "text": text, "model": active_model}
+        data = json.loads(resp["content"]) if isinstance(resp["content"], str) else resp["content"]
+        message = data["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+
+        if not tool_calls:
+            yield {
+                "type": "answer",
+                "text": (message.get("content") or "").strip() or "Analysis complete.",
+                "model": data.get("model", "claude-4-sonnet"),
+            }
             return
 
-        messages.append({"role": "assistant", "content": content})
+        messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls})
 
-        tool_results: list[dict] = []
-        for block in tool_blocks:
-            name = block["name"]
-            inputs = block.get("input", {})
-            use_id = block.get("id", "")
-            display = TOOL_DISPLAY_NAMES.get(name, name)
+        tool_results = []
+        for tc in tool_calls:
+            try:
+                inputs = json.loads(tc["function"].get("arguments") or "{}")
+            except Exception:
+                inputs = {}
+            sub_question = inputs.get("question", question)
+            use_id = tc.get("id", "")
 
-            yield {"type": "tool_call", "name": name, "display_name": display, "inputs": inputs}
+            skill = _skill_label(sub_question)
+            yield {
+                "type": "tool_call",
+                "name": "query_data",
+                "display_name": skill,
+                "inputs": {"question": sub_question},
+            }
 
             try:
-                df, description = execute_tool(name, inputs, session)
+                df, _, sql = _execute_analyst_query(sub_question, session)
                 yield {
                     "type": "tool_result",
-                    "name": name,
-                    "display_name": display,
+                    "name": "query_data",
+                    "display_name": skill,
                     "df": df,
-                    "description": description,
+                    "description": sub_question,
                     "rows": len(df),
                     "tool_use_id": use_id,
                 }
                 data_text = df.to_string(index=False) if not df.empty else "No data returned."
                 tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": use_id,
-                    "content": f"{description}\n\n{data_text}",
+                    "role": "tool",
+                    "tool_call_id": use_id,
+                    "content": f"Question: {sub_question}\nSQL: {sql}\n\nResults:\n{data_text}",
                 })
             except Exception as exc:
-                msg = f"Tool {name} error: {exc}"
+                msg = f"query_data error: {exc}"
                 yield {"type": "error", "text": msg}
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": use_id,
-                    "content": msg,
-                    "is_error": True,
-                })
+                tool_results.append({"role": "tool", "tool_call_id": use_id, "content": msg})
 
-        messages.append({"role": "user", "content": tool_results})
+        messages.extend(tool_results)
 
-    yield {"type": "answer", "text": "Analysis complete (max iterations reached)."}
-
-
-# ── Fallback path: instant keyword routing → SQL → synthesis ──────────────────
+    yield {"type": "answer", "text": "Analysis complete (max iterations reached).", "model": "claude-4-sonnet"}
+# ── Fallback path: keyword routing + hardcoded SQL + llama synthesis ───────────
 
 def _extract_hours(q: str) -> int:
-    """Extract time_window_hours from a question string."""
     m = re.search(r"last\s+(\d+)\s+hour", q)
     if m:
         return int(m.group(1))
@@ -131,15 +231,10 @@ def _extract_hours(q: str) -> int:
 
 
 def _route(question: str) -> list[dict]:
-    """
-    Instant keyword-based tool routing — no LLM call needed.
-    Returns list of {"name": str, "inputs": dict}.
-    """
     q = question.lower()
     hours = _extract_hours(q)
     tools: list[dict] = []
 
-    # Task / pipeline health
     if re.search(r"task|pipeline|job|fail|error|flak|intermittent|auto.suspend|scheduled", q):
         if re.search(r"slow|durat|long|time", q) and not re.search(r"fail|error", q):
             focus = "duration"
@@ -147,10 +242,8 @@ def _route(question: str) -> list[dict]:
             focus = "flaky"
         else:
             focus = "failures"
-        tools.append({"name": "query_task_health",
-                      "inputs": {"focus": focus, "time_window_hours": hours}})
+        tools.append({"name": "query_task_health", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    # Warehouse / credits / cost
     if re.search(r"warehouse|credit|cost|spend|idle|underutil|expensiv|burn|budget|compute", q):
         if re.search(r"idle|underutil", q):
             focus = "idle"
@@ -158,10 +251,8 @@ def _route(question: str) -> list[dict]:
             focus = "trend"
         else:
             focus = "most_expensive"
-        tools.append({"name": "query_warehouse_efficiency",
-                      "inputs": {"focus": focus, "time_window_hours": hours}})
+        tools.append({"name": "query_warehouse_efficiency", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    # Query performance
     if re.search(r"\bquer(y|ies)\b|cache|scan|perform|execut", q):
         if re.search(r"slow|slowest|long|longest", q):
             focus = "slowest"
@@ -173,10 +264,8 @@ def _route(question: str) -> list[dict]:
             focus = "cache_misses"
         else:
             focus = "all"
-        tools.append({"name": "query_performance",
-                      "inputs": {"focus": focus, "time_window_hours": hours}})
+        tools.append({"name": "query_performance", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    # Data ingestion
     if re.search(r"ingest|snowpipe|\bcopy\b|load(ing|ed|s)?|raw.data|fresh.*data", q):
         if re.search(r"fail|error", q):
             focus = "failed_loads"
@@ -186,10 +275,8 @@ def _route(question: str) -> list[dict]:
             focus = "pipe_usage"
         else:
             focus = "all"
-        tools.append({"name": "query_ingestion_health",
-                      "inputs": {"focus": focus, "time_window_hours": hours}})
+        tools.append({"name": "query_ingestion_health", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    # Transformation / dynamic tables
     if re.search(r"dynamic.table|transform|refresh|upstream|stale|lag", q):
         if re.search(r"fail|error", q):
             focus = "failures"
@@ -199,26 +286,21 @@ def _route(question: str) -> list[dict]:
             focus = "upstream_failures"
         else:
             focus = "all"
-        tools.append({"name": "query_transformation_health",
-                      "inputs": {"focus": focus, "time_window_hours": hours}})
+        tools.append({"name": "query_transformation_health", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    # Cross-domain cost breakdown (only when no other tools matched cost already)
     if re.search(r"breakdown|where.*money|total.*cost|overall.*cost|attribution|transfer", q) \
             and not any(t["name"] == "query_warehouse_efficiency" for t in tools):
-        tools.append({"name": "query_cost_breakdown",
-                      "inputs": {"time_window_hours": hours}})
+        tools.append({"name": "query_cost_breakdown", "inputs": {"time_window_hours": hours}})
 
-    # Broad / ecosystem questions — or nothing matched above
     if re.search(r"health.?check|full.?scan|ecosystem|anomal|what.*wrong|everything|overview", q) \
             or not tools:
-        tools = [{"name": "query_ecosystem_anomalies",
-                  "inputs": {"time_window_hours": hours}}]
+        tools = [{"name": "query_ecosystem_anomalies", "inputs": {"time_window_hours": hours}}]
 
     return tools
 
 
 def _synthesize(question: str, results: list[tuple[str, str, object]], session) -> tuple[str, str]:
-    """Summarise all tool results into a concise analyst response."""
+    _SYNTHESIS_MODELS = ["llama3.3-70b", "llama3.1-70b", "mistral-large2"]
     data_sections = "\n\n".join(
         f"### {display}\n{desc}\n\n"
         + (df.to_string(index=False) if not df.empty else "No data.")  # type: ignore[union-attr]
@@ -244,7 +326,6 @@ def _synthesize(question: str, results: list[tuple[str, str, object]], session) 
 
 
 def _run_fallback(question: str, session) -> Generator[dict, None, None]:
-    # Routing is instant — pure Python, zero LLM calls
     tool_calls = _route(question)
     collected: list[tuple[str, str, object]] = []
 
@@ -270,24 +351,21 @@ def _run_fallback(question: str, session) -> Generator[dict, None, None]:
     has_data = any(not df.empty for _, _, df in collected)
 
     if not collected:
-        answer = "No data could be retrieved. Please check ACCOUNT_USAGE access."
-        synth_model = "none"
+        yield {"type": "answer", "text": "No data could be retrieved. Please check ACCOUNT_USAGE access.", "model": "none"}
     elif not has_data:
-        answer = "No data found in this time window — your environment looks healthy. Try expanding the range (e.g. 'last 7 days')."
-        synth_model = "none"
+        yield {"type": "answer", "text": "No data found in this time window — your environment looks healthy.", "model": "none"}
     else:
         answer, synth_model = _synthesize(question, collected, session)
-
-    model_label = synth_model if synth_model == "none" else f"{synth_model} (fallback)"
-    yield {"type": "answer", "text": answer, "model": model_label}
+        yield {"type": "answer", "text": answer, "model": synth_model}
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
-def run_agent(question: str, session) -> Generator[dict, None, None]:
+def run_agent(question: str, history: list[dict], session) -> Generator[dict, None, None]:
     """
-    Tries native tool calling (Claude) first.
-    Falls back to keyword routing + synthesis on any failure.
+    Primary: Claude (claude-4-sonnet) via Cortex Chat Completions drives the agentic loop.
+             query_data() routes through Cortex Analyst → dynamic SQL from semantic model.
+    Fallback: keyword routing + hardcoded SQL (tools.py) + llama synthesis.
 
     Yields event dicts:
       {"type": "tool_call",   "name": str, "display_name": str, "inputs": dict}
@@ -297,7 +375,7 @@ def run_agent(question: str, session) -> Generator[dict, None, None]:
       {"type": "error",       "text": str}
     """
     try:
-        yield from _run_tool_calling(question, session)
+        yield from _run_chat_completions(question, history, session)
     except Exception as exc:
-        yield {"type": "error", "text": f"[Tool calling failed, using fallback] {exc}"}
+        yield {"type": "error", "text": f"[Primary failed, using fallback] {exc}"}
         yield from _run_fallback(question, session)

@@ -9,42 +9,70 @@ session = get_active_session()
 
 st.set_page_config(page_title="Snowflake Ecosystem Analyst", layout="wide")
 
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown(
+        """
+        <h2 style='color:#29B5E8; margin-bottom:2px'>Snowflake Analyst</h2>
+        <p style='color:#888; font-size:13px; margin-top:0'>
+            Live insights across pipelines, compute, queries, and ingestion
+        </p>
+        <hr style='margin:12px 0'>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<p style='font-size:13px; color:#aaa; margin-bottom:8px'>Quick questions</p>", unsafe_allow_html=True)
+
+    SUGGESTIONS = [
+        ("Pipeline Failures",    "Which tasks have the highest failure rate in the last 7 days?"),
+        ("Warehouse Costs",      "Which warehouses consumed the most credits in the last 7 days?"),
+        ("Slow Queries",         "Which queries ran the slowest in the last 7 days?"),
+        ("Ingestion Health",     "How many rows were loaded via COPY commands in the last 7 days?"),
+        ("Slowest Pipelines",    "Which tasks are taking the longest to run on average in the last 7 days?"),
+        ("Idle Warehouses",      "Which warehouses are underutilized or idle?"),
+    ]
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for label, q in SUGGESTIONS:
+        if st.button(label, key=f"sug_{label}", use_container_width=True):
+            st.session_state.pending_question = q
+
+    st.markdown("<hr style='margin:16px 0'>", unsafe_allow_html=True)
+    if st.button("Clear conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+
+# ── Main header ────────────────────────────────────────────────────────────────
+
 st.markdown(
     """
-    <h1 style='color:#29B5E8'>❄️ Snowflake Data Ecosystem Analyst</h1>
-    <p style='color:#888; margin-top:-8px'>
-        AI agent with live skills across ingestion · transformation · pipelines · compute · cost
+    <h1 style='color:#29B5E8; margin-bottom:2px'>Snowflake Data Ecosystem Analyst</h1>
+    <p style='color:#888; margin-top:0; margin-bottom:20px; font-size:14px'>
+        Real-time operational intelligence across your Snowflake data platform, 
+        monitor pipeline reliability, warehouse costs, query performance, and ingestion health
+        using live Account Usage data.
     </p>
-    <hr style='margin-bottom:12px'>
     """,
     unsafe_allow_html=True,
 )
 
-# ── Suggestion buttons ─────────────────────────────────────────────────────────
-
-SUGGESTIONS = [
-    ("🌐 Full Ecosystem Scan", "Run a full health check across my entire data ecosystem"),
-    ("🔴 Pipeline Failures",   "Which tasks have the highest failure rate?"),
-    ("💰 Cost Breakdown",      "Which warehouses are costing the most and why?"),
-    ("🐌 Slow Queries",        "Which queries are running the slowest and scanning the most data?"),
-    ("📥 Ingestion Health",    "How is my data ingestion performing? Check both Snowpipe and COPY loads."),
-    ("🔄 Transform Health",    "Are my dynamic tables refreshing successfully?"),
-]
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-st.markdown("**Try asking:**")
-cols = st.columns(3)
-for i, (label, q) in enumerate(SUGGESTIONS):
-    if cols[i % 3].button(label, key=f"sug_{i}", use_container_width=True):
-        st.session_state.pending_question = q
 
 # ── Chart helper ───────────────────────────────────────────────────────────────
 
 def _render_chart(df: pd.DataFrame):
     if df.empty:
         return
+    # Convert epoch-ms string columns to readable dates (Cortex Analyst DATE serialization)
+    df = df.copy()
+    for col in df.select_dtypes(include="object").columns:
+        sample = df[col].dropna().head(5)
+        if len(sample) > 0 and all(isinstance(v, str) and v.isdigit() and len(v) >= 12 for v in sample):
+            df[col] = pd.to_datetime(df[col].astype("int64"), unit="ms").dt.strftime("%Y-%m-%d")
     numeric = df.select_dtypes(include="number").columns.tolist()
     text = df.select_dtypes(include="object").columns.tolist()
     if not numeric or not text:
@@ -60,7 +88,7 @@ def _render_chart(df: pd.DataFrame):
             tooltip=df.columns.tolist(),
             **({"color": alt.Color(f"{color}:N")} if color else {}),
         )
-        .properties(height=280)
+        .properties(height=260)
         .interactive()
     )
     st.altair_chart(chart, use_container_width=True)
@@ -70,29 +98,25 @@ def _render_chart(df: pd.DataFrame):
 
 def _render_history_message(msg: dict):
     if msg.get("tool_calls"):
-        model_badge = f" · `{msg['model']}`" if msg.get("model") else ""
-        with st.expander(f"🔧 {len(msg['tool_calls'])} skill(s) invoked{model_badge}", expanded=False):
-            for tc in msg["tool_calls"]:
-                st.markdown(f"**{tc['display_name']}** — `{tc['name']}`")
-                if tc.get("inputs"):
-                    st.json(tc["inputs"])
+        n = len(msg["tool_calls"])
+        with st.expander(f"{n} {'query' if n == 1 else 'queries'}", expanded=False):
+            for line in msg.get("trace_lines", []):
+                st.markdown(line)
 
     for tr in msg.get("tool_results", []):
-        st.markdown(f"##### 📊 {tr['display_name']}")
-        st.caption(tr["description"])
+        st.caption(tr["description"] or tr["display_name"])
         df = pd.DataFrame(tr["data"])
         if not df.empty:
             _render_chart(df)
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("No data returned for this skill.")
+            st.info("No data returned.")
 
     if msg.get("answer"):
-        st.markdown("---")
-        st.markdown("### 🧠 Analysis")
+        st.divider()
         st.markdown(msg["answer"])
 
-    if msg.get("errors"):
+    if msg.get("errors") and not msg.get("answer"):
         for err in msg["errors"]:
             st.error(err)
 
@@ -109,7 +133,7 @@ for msg in st.session_state.messages:
 
 # ── Chat input + live agent run ────────────────────────────────────────────────
 
-question = st.chat_input("Ask about your Snowflake data ecosystem...")
+question = st.chat_input("Ask about your Snowflake environment...")
 
 if "pending_question" in st.session_state:
     question = st.session_state.pop("pending_question")
@@ -119,34 +143,29 @@ if question:
     with st.chat_message("user"):
         st.write(question)
 
-    # Accumulators for saving to history
     assistant_record: dict = {
         "role": "assistant",
         "content": question,
         "tool_calls": [],
         "tool_results": [],
+        "trace_lines": [],
         "errors": [],
         "answer": "",
         "model": "",
     }
 
     with st.chat_message("assistant"):
-        # Live tool-call trace container
         trace_container = st.empty()
-        trace_lines: list[str] = []
+        result_sections: list[dict] = []
 
-        result_sections: list[dict] = []   # (display_name, description, df) to render after trace
-        answer_placeholder = st.empty()
-
-        with st.spinner("Agent is analyzing your ecosystem..."):
-            for event in run_agent(question, session):
+        with st.spinner("Fetching live data..."):
+            for event in run_agent(question, st.session_state.messages[:-1], session):
                 etype = event["type"]
 
                 if etype == "tool_call":
-                    trace_lines.append(
-                        f"🔍 **{event['display_name']}** — querying live data..."
-                    )
-                    trace_container.markdown("\n\n".join(trace_lines))
+                    sub_q = event.get("inputs", {}).get("question", "")
+                    label = f": {sub_q}" if sub_q else ""
+                    assistant_record["trace_lines"].append(f"{event['display_name']}{label}")
                     assistant_record["tool_calls"].append({
                         "name": event["name"],
                         "display_name": event["display_name"],
@@ -155,10 +174,8 @@ if question:
 
                 elif etype == "tool_result":
                     rows = event["rows"]
-                    trace_lines[-1] = (
-                        f"✅ **{event['display_name']}** — {rows} row{'s' if rows != 1 else ''} returned"
-                    )
-                    trace_container.markdown("\n\n".join(trace_lines))
+                    last = assistant_record["trace_lines"][-1]
+                    assistant_record["trace_lines"][-1] = last + f" ({rows} {'row' if rows == 1 else 'rows'})"
                     result_sections.append(event)
                     assistant_record["tool_results"].append({
                         "name": event["name"],
@@ -168,41 +185,35 @@ if question:
                     })
 
                 elif etype == "error":
-                    trace_lines.append(f"⚠️ {event['text']}")
-                    trace_container.markdown("\n\n".join(trace_lines))
+                    assistant_record["trace_lines"].append(event["text"])
                     assistant_record["errors"].append(event["text"])
 
                 elif etype == "answer":
                     assistant_record["answer"] = event["text"]
                     assistant_record["model"] = event.get("model", "")
 
-        # Clear spinner; render tool trace as a collapsed expander
         trace_container.empty()
+
         if assistant_record["tool_calls"]:
-            model_badge = f" · `{assistant_record['model']}`" if assistant_record.get("model") else ""
-            with st.expander(
-                f"🔧 {len(assistant_record['tool_calls'])} skill(s) invoked{model_badge}", expanded=False
-            ):
-                for line in trace_lines:
+            n = len(assistant_record["tool_calls"])
+            with st.expander(f"{n} {'query' if n == 1 else 'queries'}", expanded=False):
+                for line in assistant_record["trace_lines"]:
                     st.markdown(line)
 
-        # Render each tool result (chart + table)
         for ev in result_sections:
-            st.markdown(f"##### 📊 {ev['display_name']}")
-            st.caption(ev["description"])
+            st.caption(ev["description"] or ev["display_name"])
             if not ev["df"].empty:
                 _render_chart(ev["df"])
                 st.dataframe(ev["df"], use_container_width=True)
             else:
-                st.info("No data returned for this skill.")
+                st.info("No data returned.")
 
-        # Final analysis
         if assistant_record["answer"]:
-            st.markdown("---")
-            st.markdown("### 🧠 Analysis")
+            st.divider()
             st.markdown(assistant_record["answer"])
 
-        for err in assistant_record["errors"]:
-            st.error(err)
+        if assistant_record["errors"] and not assistant_record["answer"]:
+            for err in assistant_record["errors"]:
+                st.error(err)
 
     st.session_state.messages.append(assistant_record)

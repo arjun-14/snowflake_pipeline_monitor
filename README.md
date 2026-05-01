@@ -1,46 +1,47 @@
-# Pipeline Health Monitor
+# Snowflake Data Ecosystem Analyst
 
-![Architecture](Gemini_Generated_Image_apsi9japsi9japsi.png)
+![Architecture](architecture_diagram.png)
 
-A Streamlit app that lets you ask plain-English questions about your Snowflake pipeline health. It uses **Snowflake Cortex Analyst** to translate natural language into SQL, executes the query against `SNOWFLAKE.ACCOUNT_USAGE`, and uses **Cortex COMPLETE** (Mistral Large) to generate an executive summary of the results.
+A Streamlit-in-Snowflake app that answers plain-English questions about your Snowflake data platform. Ask about pipeline failures, warehouse costs, slow queries, or ingestion health — and get back live charts, data tables, and an AI-generated analysis with specific numbers and actionable recommendations.
 
 ## What it does
 
-You type a question like *"Which tasks have the highest failure rate?"* and the app:
+1. Claude receives the question and decides which data domains to query
+2. For each domain, it calls `query_data(question)` — a tool backed by Cortex Analyst
+3. Cortex Analyst translates the sub-question into SQL using `semantic_model.yaml`
+4. SQL executes against `SNOWFLAKE.ACCOUNT_USAGE` and returns a DataFrame
+5. Results are fed back to Claude, which may call additional domains
+6. Claude synthesizes all results into a concise analysis with specific numbers and 2-3 actionable recommendations
+7. Streamlit renders bar charts, data tables, and the final markdown summary
 
-1. Sends the question to Cortex Analyst, which generates SQL using the semantic model
-2. Executes the SQL against Snowflake Account Usage views
-3. Renders a bar chart (where applicable) and a data table
-4. Uses Cortex COMPLETE to write a 2–3 sentence actionable summary
-5. Shows the generated SQL in an expandable section
+Conversation history is preserved within the session for follow-up questions.
 
-Chat history is preserved within the session so you can ask follow-up questions.
+## Data domains
 
-## Data sources
-
-The semantic model (`semantic_model.yaml`) exposes three Account Usage views, all filtered to the **last 30 days** by default:
-
-| Table | Source view | What it tracks |
+| Domain | Source view | What it covers |
 |---|---|---|
-| `task_history` | `SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY` | Task/pipeline execution outcomes, durations, failure reasons |
-| `warehouse_metering` | `SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY` | Hourly credit consumption by warehouse |
-| `query_history` | `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` | Query performance, bytes scanned, execution status |
+| Pipeline Health | `TASK_HISTORY` | Task execution outcomes, failure rates, durations, auto-suspensions |
+| Warehouse Credits | `WAREHOUSE_METERING_HISTORY` | Hourly credit consumption, idle warehouses, daily spend trends |
+| Query Performance | `QUERY_HISTORY` | Execution time, bytes scanned, cache hit rate, queue wait, spill |
+| Snowpipe Ingestion | `PIPE_USAGE_HISTORY` | Credits consumed, files loaded, daily ingestion trends |
+| Dynamic Table Refreshes | `DYNAMIC_TABLE_REFRESH_HISTORY` | Refresh failure rates, durations, upstream failures |
+| COPY Bulk Loads | `COPY_HISTORY` | Rows loaded, success rates, load volumes |
 
 ## Example questions
 
-- Which tasks have the highest failure rate?
-- How many credits has each warehouse consumed?
-- Which pipelines take the longest to run?
+- Which tasks have the highest failure rate in the last 7 days?
+- Which warehouses consumed the most credits this week?
+- Which queries ran the slowest in the last 7 days?
 - Which warehouses are idle or underutilized?
-- Which pipelines are intermittently failing?
-- Which queries are scanning the most data?
+- Which tasks are taking the longest to run on average?
+- How many rows were loaded via COPY commands in the last 7 days?
 
 ## Setup
 
 ### Prerequisites
 
 - Snowflake account with access to `SNOWFLAKE.ACCOUNT_USAGE`
-- Snowflake Cortex Analyst enabled
+- Snowflake Cortex enabled (Cortex Analyst + Chat Completions)
 - Snowpark-enabled Streamlit (runs natively inside Snowflake)
 
 ### Deployment
@@ -52,11 +53,13 @@ The semantic model (`semantic_model.yaml`) exposes three Account Usage views, al
 
 2. Deploy `streamlit_app.py` as a Streamlit in Snowflake app in the `PIPELINE_MONITOR.TASKS` schema.
 
-3. The app picks up the active Snowpark session automatically — no credentials are needed in the code.
+3. The app picks up the active Snowpark session automatically — no credentials needed in the code.
 
 ## Project structure
 
 ```
-streamlit_app.py       # Streamlit UI and Cortex Analyst integration
-semantic_model.yaml    # Natural language → SQL mapping for Cortex Analyst
+streamlit_app.py       # Streamlit UI — layout, chart rendering, conversation history
+agent.py               # Agentic loop — Claude orchestration, Cortex Analyst integration, fallback path
+tools.py               # Fallback SQL tools — hardcoded queries per domain + Llama synthesis
+semantic_model.yaml    # Cortex Analyst semantic model — NL-to-SQL mappings for all 6 domains
 ```
