@@ -1,8 +1,10 @@
-name: Pipeline Health Monitor
+name: Snowflake Data Ecosystem Monitor
 description: >
-  Semantic model for monitoring Snowflake pipeline health across task execution,
-  warehouse utilization, and query performance. Enables natural language questions
-  about pipeline failures, credit consumption, and operational efficiency.
+  Semantic model covering the full Snowflake data ecosystem: task/pipeline execution,
+  warehouse credit consumption, query performance, Snowpipe and COPY ingestion,
+  dynamic table transformation health, and cost attribution. Enables natural language
+  questions about reliability, performance, cost, and operational efficiency across
+  every layer of the data platform.
 
 tables:
   - name: task_history
@@ -100,6 +102,16 @@ tables:
         description: The date the task was scheduled to run
         expr: SCHEDULED_TIME::DATE
         data_type: DATE
+      - name: scheduled_at
+        synonyms:
+          - timestamp
+          - exact time
+          - hour
+          - last 24 hours
+          - last N hours
+        description: Exact timestamp the task was scheduled — use for hour-level filtering
+        expr: SCHEDULED_TIME
+        data_type: TIMESTAMP
     measures:
       - name: total_runs
         synonyms:
@@ -213,6 +225,14 @@ tables:
         description: The date of the metering interval
         expr: START_TIME::DATE
         data_type: DATE
+      - name: metering_at
+        synonyms:
+          - timestamp
+          - hour
+          - last N hours
+        description: Exact timestamp of the metering interval — use for hour-level filtering
+        expr: START_TIME
+        data_type: TIMESTAMP
     measures:
       - name: total_credits
         synonyms:
@@ -394,6 +414,14 @@ tables:
         description: The date the query was executed
         expr: START_TIME::DATE
         data_type: DATE
+      - name: query_at
+        synonyms:
+          - timestamp
+          - hour
+          - last N hours
+        description: Exact timestamp the query started — use for hour-level filtering
+        expr: START_TIME
+        data_type: TIMESTAMP
     measures:
       - name: total_queries
         synonyms:
@@ -463,6 +491,379 @@ tables:
           - micro partitions
         description: Total number of micro-partitions scanned across all queries
         expr: SUM(PARTITIONS_SCANNED)
+        data_type: NUMBER
+      - name: avg_compilation_ms
+        synonyms:
+          - compilation time
+          - parse time
+          - planning overhead
+        description: Average time spent compiling/planning the query in milliseconds
+        expr: ROUND(AVG(COMPILATION_TIME), 2)
+        data_type: NUMBER
+      - name: avg_queued_ms
+        synonyms:
+          - queue wait
+          - queuing time
+          - warehouse wait
+          - time waiting
+        description: Average time queries spent waiting in the warehouse queue in milliseconds
+        expr: ROUND(AVG(QUEUED_PROVISIONING_TIME + QUEUED_REPAIR_TIME + QUEUED_OVERLOAD_TIME), 2)
+        data_type: NUMBER
+      - name: total_spill_local_gb
+        synonyms:
+          - local spill
+          - memory spill
+          - disk spill
+        description: Total gigabytes spilled to local disk due to memory pressure
+        expr: ROUND(SUM(BYTES_SPILLED_TO_LOCAL_STORAGE) / 1024 / 1024 / 1024, 4)
+        data_type: NUMBER
+      - name: total_spill_remote_gb
+        synonyms:
+          - remote spill
+          - severe spill
+          - S3 spill
+        description: Total gigabytes spilled to remote storage — indicates severe memory pressure
+        expr: ROUND(SUM(BYTES_SPILLED_TO_REMOTE_STORAGE) / 1024 / 1024 / 1024, 4)
+        data_type: NUMBER
+      - name: pruning_ratio
+        synonyms:
+          - partition pruning
+          - pruning efficiency
+          - filter efficiency
+        description: How effectively partition pruning reduced data scanned (0 = no pruning, 1 = perfect)
+        expr: ROUND(1 - SUM(PARTITIONS_SCANNED) / NULLIF(SUM(PARTITIONS_TOTAL), 0), 4)
+        data_type: NUMBER
+
+  - name: pipe_ingestion
+    description: >
+      Hourly Snowpipe credit consumption and data volume. Use this to answer questions about
+      Snowpipe activity, ingestion cost, bytes inserted, and files processed per pipe.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: PIPE_USAGE_HISTORY
+    filters:
+      - name: recent_pipe_usage
+        synonyms:
+          - recent ingestion
+          - last 30 days
+        description: Filters to pipe usage in the last 30 days
+        expr: START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: pipe_name
+        synonyms:
+          - pipe
+          - snowpipe name
+          - ingestion pipe
+        description: The name of the Snowpipe
+        expr: PIPE_NAME
+        data_type: TEXT
+      - name: pipe_id
+        synonyms:
+          - pipe identifier
+        description: Unique numeric ID of the Snowpipe
+        expr: PIPE_ID
+        data_type: NUMBER
+      - name: start_time
+        synonyms:
+          - interval start
+          - hour
+        description: Start of the hourly metering interval
+        expr: START_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: ingestion_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of the pipe usage interval
+        expr: START_TIME::DATE
+        data_type: DATE
+      - name: ingestion_at
+        synonyms:
+          - timestamp
+          - hour
+          - last N hours
+        description: Exact timestamp of the ingestion interval — use for hour-level filtering
+        expr: START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_credits
+        synonyms:
+          - ingestion cost
+          - credits used
+          - pipe credits
+        description: Total credits consumed by the pipe
+        expr: ROUND(SUM(CREDITS_USED), 4)
+        data_type: NUMBER
+      - name: total_bytes_inserted
+        synonyms:
+          - bytes ingested
+          - data inserted
+          - volume
+        description: Total bytes inserted by the pipe
+        expr: SUM(BYTES_INSERTED)
+        data_type: NUMBER
+      - name: total_files_inserted
+        synonyms:
+          - files loaded
+          - file count
+        description: Total number of files inserted by the pipe
+        expr: SUM(FILES_INSERTED)
+        data_type: NUMBER
+      - name: avg_credits_per_file
+        synonyms:
+          - cost per file
+          - efficiency
+        description: Average credits consumed per file inserted
+        expr: ROUND(SUM(CREDITS_USED) / NULLIF(SUM(FILES_INSERTED), 0), 6)
+        data_type: NUMBER
+
+  - name: dynamic_table_refresh
+    description: >
+      History of dynamic table refresh operations. Use this to answer questions about
+      transformation health, refresh failures, data freshness lag, and upstream failures.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: DYNAMIC_TABLE_REFRESH_HISTORY
+    filters:
+      - name: recent_refreshes
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to refreshes in the last 30 days
+        expr: REFRESH_START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: table_name
+        synonyms:
+          - dynamic table
+          - table
+          - transformation
+        description: The name of the dynamic table
+        expr: NAME
+        data_type: TEXT
+      - name: database_name
+        synonyms:
+          - database
+          - db
+        description: Database containing the dynamic table
+        expr: DATABASE_NAME
+        data_type: TEXT
+      - name: schema_name
+        synonyms:
+          - schema
+        description: Schema containing the dynamic table
+        expr: SCHEMA_NAME
+        data_type: TEXT
+      - name: state
+        synonyms:
+          - refresh status
+          - outcome
+          - result
+        description: >
+          Refresh outcome. Values: SUCCEEDED, FAILED, CANCELLED, UPSTREAM_FAILED, EXECUTING.
+        expr: STATE
+        data_type: TEXT
+      - name: refresh_action
+        synonyms:
+          - refresh type
+          - incremental or full
+        description: >
+          Type of refresh performed. Values: INCREMENTAL, FULL, NO_DATA, REINITIALIZE.
+        expr: REFRESH_ACTION
+        data_type: TEXT
+      - name: refresh_trigger
+        synonyms:
+          - what triggered it
+          - trigger type
+        description: What triggered the refresh — SCHEDULED, MANUAL, or CREATION.
+        expr: REFRESH_TRIGGER
+        data_type: TEXT
+      - name: refresh_start_time
+        synonyms:
+          - when it started
+          - start
+        description: When the refresh began
+        expr: REFRESH_START_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: refresh_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of the refresh
+        expr: REFRESH_START_TIME::DATE
+        data_type: DATE
+      - name: refresh_at
+        synonyms:
+          - timestamp
+          - hour
+          - last N hours
+        description: Exact timestamp the refresh started — use for hour-level filtering
+        expr: REFRESH_START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_refreshes
+        synonyms:
+          - refresh count
+          - number of refreshes
+        description: Total number of refresh attempts
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: successful_refreshes
+        synonyms:
+          - succeeded
+          - successful
+        description: Number of refreshes that succeeded
+        expr: COUNT_IF(STATE = 'SUCCEEDED')
+        data_type: NUMBER
+      - name: failed_refreshes
+        synonyms:
+          - failures
+          - failed
+          - errors
+        description: Number of refreshes that failed or were cancelled
+        expr: COUNT_IF(STATE IN ('FAILED', 'CANCELLED'))
+        data_type: NUMBER
+      - name: upstream_failed_refreshes
+        synonyms:
+          - upstream failures
+          - blocked refreshes
+        description: Number of refreshes that failed due to an upstream table failure
+        expr: COUNT_IF(STATE = 'UPSTREAM_FAILED')
+        data_type: NUMBER
+      - name: failure_rate
+        synonyms:
+          - error rate
+          - percent failed
+        description: Percentage of refresh attempts that failed
+        expr: ROUND(COUNT_IF(STATE IN ('FAILED', 'CANCELLED')) / NULLIF(COUNT(*), 0) * 100, 2)
+        data_type: NUMBER
+      - name: avg_refresh_seconds
+        synonyms:
+          - average refresh duration
+          - how long refreshes take
+        description: Average refresh duration in seconds
+        expr: ROUND(AVG(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)), 2)
+        data_type: NUMBER
+
+  - name: copy_history
+    description: >
+      History of COPY INTO statements and Snowpipe continuous data loads. Use this to answer
+      questions about bulk data loading, load success rates, tables loaded, and row counts.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: COPY_HISTORY
+    filters:
+      - name: recent_loads
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to loads in the last 30 days
+        expr: LAST_LOAD_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: table_name
+        synonyms:
+          - destination table
+          - target table
+          - loaded table
+        description: The table data was loaded into
+        expr: TABLE_NAME
+        data_type: TEXT
+      - name: schema_name
+        synonyms:
+          - schema
+        description: Schema of the destination table
+        expr: TABLE_SCHEMA_NAME
+        data_type: TEXT
+      - name: database_name
+        synonyms:
+          - database
+          - db
+        description: Database of the destination table
+        expr: TABLE_CATALOG_NAME
+        data_type: TEXT
+      - name: pipe_name
+        synonyms:
+          - pipe
+          - snowpipe
+        description: The Snowpipe associated with this load (if any)
+        expr: PIPE_NAME
+        data_type: TEXT
+      - name: stage_location
+        synonyms:
+          - source stage
+          - stage
+          - source location
+        description: The stage or location data was loaded from
+        expr: STAGE_LOCATION
+        data_type: TEXT
+      - name: status
+        synonyms:
+          - load status
+          - outcome
+          - result
+        description: Load outcome — Loaded, Load failed, Partially loaded, Copy already done, etc.
+        expr: STATUS
+        data_type: TEXT
+      - name: last_load_time
+        synonyms:
+          - when loaded
+          - load time
+        description: When the load completed
+        expr: LAST_LOAD_TIME
+        data_type: TIMESTAMP
+    time_dimensions:
+      - name: load_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of the load
+        expr: LAST_LOAD_TIME::DATE
+        data_type: DATE
+      - name: load_at
+        synonyms:
+          - timestamp
+          - hour
+          - last N hours
+        description: Exact timestamp the load completed — use for hour-level filtering
+        expr: LAST_LOAD_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_loads
+        synonyms:
+          - load count
+          - number of loads
+        description: Total number of load operations
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: successful_loads
+        synonyms:
+          - successful
+          - loaded
+        description: Number of loads that completed successfully
+        expr: COUNT_IF(STATUS = 'Loaded')
+        data_type: NUMBER
+      - name: failed_loads
+        synonyms:
+          - failures
+          - failed loads
+          - load errors
+        description: Number of loads that failed
+        expr: COUNT_IF(STATUS NOT IN ('Loaded', 'Copy already done'))
+        data_type: NUMBER
+      - name: total_rows_loaded
+        synonyms:
+          - rows ingested
+          - rows loaded
+          - record count
+        description: Total rows successfully loaded
+        expr: SUM(ROW_COUNT)
         data_type: NUMBER
 
 verified_queries:
@@ -546,3 +947,243 @@ verified_queries:
       WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
       ORDER BY gb_scanned DESC
       LIMIT 20;
+
+  - name: snowpipe_usage_by_pipe
+    question: Which Snowpipes are consuming the most credits?
+    sql: |
+      SELECT
+        PIPE_NAME,
+        ROUND(SUM(CREDITS_USED), 4) AS total_credits,
+        SUM(FILES_INSERTED) AS total_files_inserted,
+        SUM(BYTES_INSERTED) AS total_bytes_inserted,
+        ROUND(SUM(CREDITS_USED) / NULLIF(SUM(FILES_INSERTED), 0), 6) AS avg_credits_per_file
+      FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY PIPE_NAME
+      ORDER BY total_credits DESC;
+
+  - name: dynamic_table_failure_summary
+    question: Which dynamic tables have the highest refresh failure rate?
+    sql: |
+      SELECT
+        NAME AS table_name,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        COUNT(*) AS total_refreshes,
+        COUNT_IF(STATE = 'SUCCEEDED') AS successful_refreshes,
+        COUNT_IF(STATE IN ('FAILED', 'CANCELLED')) AS failed_refreshes,
+        COUNT_IF(STATE = 'UPSTREAM_FAILED') AS upstream_failed,
+        ROUND(COUNT_IF(STATE IN ('FAILED', 'CANCELLED')) / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+      WHERE REFRESH_START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY NAME, DATABASE_NAME, SCHEMA_NAME
+      ORDER BY failure_rate_pct DESC;
+
+  - name: copy_load_success_by_table
+    question: How successful are data loads into each table?
+    sql: |
+      SELECT
+        TABLE_CATALOG_NAME AS database_name,
+        TABLE_SCHEMA_NAME AS schema_name,
+        TABLE_NAME,
+        COUNT(*) AS total_loads,
+        COUNT_IF(STATUS = 'Loaded') AS successful_loads,
+        COUNT_IF(STATUS NOT IN ('Loaded', 'Copy already done')) AS failed_loads,
+        SUM(ROW_COUNT) AS total_rows_loaded,
+        ROUND(COUNT_IF(STATUS = 'Loaded') / NULLIF(COUNT(*), 0) * 100, 2) AS success_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+      WHERE LAST_LOAD_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY TABLE_CATALOG_NAME, TABLE_SCHEMA_NAME, TABLE_NAME
+      ORDER BY failed_loads DESC, total_loads DESC;
+
+  - name: task_daily_failure_trend
+    question: How has the task failure rate trended over the last 30 days?
+    sql: |
+      SELECT
+        SCHEDULED_TIME::DATE AS run_date,
+        COUNT(*) AS total_runs,
+        COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) AS failed_runs,
+        ROUND(COUNT_IF(STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')) / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY run_date
+      ORDER BY run_date DESC;
+
+  - name: auto_suspended_tasks
+    question: Which tasks have been auto-suspended and need attention?
+    sql: |
+      SELECT
+        NAME,
+        COUNT(*) AS suspension_count,
+        MAX(SCHEDULED_TIME) AS last_suspended_at,
+        ERROR_CODE,
+        ERROR_MESSAGE
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE STATE = 'FAILED_AND_AUTO_SUSPENDED'
+        AND SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY NAME, ERROR_CODE, ERROR_MESSAGE
+      ORDER BY suspension_count DESC;
+
+  - name: task_error_breakdown
+    question: What are the most common failure reasons across all tasks?
+    sql: |
+      SELECT
+        ERROR_CODE,
+        ERROR_MESSAGE,
+        COUNT(*) AS occurrence_count,
+        COUNT(DISTINCT NAME) AS affected_tasks
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+      WHERE STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')
+        AND SCHEDULED_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND ERROR_MESSAGE IS NOT NULL
+      GROUP BY ERROR_CODE, ERROR_MESSAGE
+      ORDER BY occurrence_count DESC
+      LIMIT 20;
+
+  - name: warehouse_daily_spend
+    question: How has warehouse credit spend trended day by day?
+    sql: |
+      SELECT
+        START_TIME::DATE AS spend_date,
+        WAREHOUSE_NAME,
+        ROUND(SUM(CREDITS_USED), 4) AS daily_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY spend_date, WAREHOUSE_NAME
+      ORDER BY spend_date DESC, daily_credits DESC;
+
+  - name: cloud_service_heavy_warehouses
+    question: Which warehouses have excessive cloud service credit usage?
+    sql: |
+      SELECT
+        WAREHOUSE_NAME,
+        ROUND(SUM(CREDITS_USED_COMPUTE), 4) AS compute_credits,
+        ROUND(SUM(CREDITS_USED_CLOUD_SERVICES), 4) AS cloud_service_credits,
+        ROUND(SUM(CREDITS_USED), 4) AS total_credits,
+        ROUND(SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100, 2) AS cloud_service_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY WAREHOUSE_NAME
+      HAVING cloud_service_pct > 10
+      ORDER BY cloud_service_pct DESC;
+
+  - name: slowest_queries
+    question: Which queries are running the slowest by execution time?
+    sql: |
+      SELECT
+        QUERY_ID,
+        QUERY_TYPE,
+        WAREHOUSE_NAME,
+        USER_NAME,
+        ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds,
+        ROUND(BYTES_SCANNED / 1024 / 1024 / 1024, 2) AS gb_scanned,
+        ROWS_PRODUCED
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND EXECUTION_STATUS = 'SUCCESS'
+      ORDER BY duration_seconds DESC
+      LIMIT 20;
+
+  - name: query_failures_by_warehouse
+    question: Which warehouses have the most query failures?
+    sql: |
+      SELECT
+        WAREHOUSE_NAME,
+        COUNT(*) AS total_queries,
+        COUNT_IF(EXECUTION_STATUS = 'FAIL') AS failed_queries,
+        ROUND(COUNT_IF(EXECUTION_STATUS = 'FAIL') / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND WAREHOUSE_NAME IS NOT NULL
+      GROUP BY WAREHOUSE_NAME
+      ORDER BY failed_queries DESC;
+
+  - name: top_users_by_compute
+    question: Which users are consuming the most compute resources?
+    sql: |
+      SELECT
+        USER_NAME,
+        COUNT(*) AS total_queries,
+        ROUND(SUM(TOTAL_ELAPSED_TIME) / 1000 / 3600, 2) AS total_hours_elapsed,
+        ROUND(SUM(BYTES_SCANNED) / 1024 / 1024 / 1024, 2) AS total_gb_scanned,
+        ROUND(AVG(TOTAL_ELAPSED_TIME) / 1000, 2) AS avg_duration_seconds
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND USER_NAME IS NOT NULL
+      GROUP BY USER_NAME
+      ORDER BY total_gb_scanned DESC
+      LIMIT 20;
+
+  - name: cache_hit_rate
+    question: What is the query result cache hit rate by warehouse?
+    sql: |
+      SELECT
+        WAREHOUSE_NAME,
+        COUNT(*) AS total_queries,
+        COUNT_IF(BYTES_SCANNED = 0 AND EXECUTION_STATUS = 'SUCCESS') AS cache_hits,
+        ROUND(COUNT_IF(BYTES_SCANNED = 0 AND EXECUTION_STATUS = 'SUCCESS') / NULLIF(COUNT(*), 0) * 100, 2) AS cache_hit_rate_pct
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND WAREHOUSE_NAME IS NOT NULL
+      GROUP BY WAREHOUSE_NAME
+      ORDER BY cache_hit_rate_pct ASC;
+
+  - name: ingestion_daily_volume
+    question: How has Snowpipe ingestion volume trended over the last 30 days?
+    sql: |
+      SELECT
+        START_TIME::DATE AS ingestion_date,
+        PIPE_NAME,
+        SUM(FILES_INSERTED) AS files_inserted,
+        ROUND(SUM(BYTES_INSERTED) / 1024 / 1024, 2) AS mb_inserted,
+        ROUND(SUM(CREDITS_USED), 4) AS credits_used
+      FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY ingestion_date, PIPE_NAME
+      ORDER BY ingestion_date DESC, mb_inserted DESC;
+
+  - name: dynamic_table_slowest_refreshes
+    question: Which dynamic tables have the slowest refresh times?
+    sql: |
+      SELECT
+        NAME AS table_name,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        COUNT(*) AS total_refreshes,
+        ROUND(AVG(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)), 2) AS avg_refresh_seconds,
+        MAX(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)) AS max_refresh_seconds
+      FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+      WHERE REFRESH_START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND STATE = 'SUCCEEDED'
+        AND REFRESH_END_TIME IS NOT NULL
+      GROUP BY NAME, DATABASE_NAME, SCHEMA_NAME
+      ORDER BY avg_refresh_seconds DESC;
+
+  - name: peak_query_hours
+    question: What hours of the day see the most query activity?
+    sql: |
+      SELECT
+        HOUR(START_TIME) AS hour_of_day,
+        COUNT(*) AS total_queries,
+        ROUND(AVG(TOTAL_ELAPSED_TIME) / 1000, 2) AS avg_duration_seconds,
+        ROUND(SUM(BYTES_SCANNED) / 1024 / 1024 / 1024, 2) AS total_gb_scanned
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+      GROUP BY hour_of_day
+      ORDER BY total_queries DESC;
+
+  - name: copy_failed_loads
+    question: Which tables have had failed or partial data loads recently?
+    sql: |
+      SELECT
+        TABLE_CATALOG_NAME AS database_name,
+        TABLE_SCHEMA_NAME AS schema_name,
+        TABLE_NAME,
+        STATUS,
+        COUNT(*) AS load_count,
+        MAX(LAST_LOAD_TIME) AS most_recent_failure
+      FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+      WHERE LAST_LOAD_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+        AND STATUS NOT IN ('Loaded', 'Copy already done')
+      GROUP BY database_name, schema_name, TABLE_NAME, STATUS
+      ORDER BY load_count DESC;
