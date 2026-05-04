@@ -7,6 +7,643 @@ description: >
   every layer of the data platform.
 
 tables:
+  - name: metering_history
+    description: >
+      Hourly credit consumption across all Snowflake services including warehouse compute,
+      serverless features, cloud services, and AI services. Use for cost breakdown by
+      service type, week-over-week comparisons, and identifying what drives the bill.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: METERING_HISTORY
+    filters:
+      - name: recent_metering
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to metering data in the last 30 days
+        expr: START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+    dimensions:
+      - name: service_type
+        synonyms:
+          - service
+          - cost category
+          - billing category
+        description: >
+          The Snowflake service consuming credits. Values include WAREHOUSE_METERING,
+          AI_SERVICES, SNOWPARK_CONTAINER_SERVICES, AUTO_CLUSTERING, PIPE, CORTEX_CODE_SNOWSIGHT, etc.
+        expr: SERVICE_TYPE
+        data_type: TEXT
+      - name: name
+        synonyms:
+          - resource name
+          - warehouse name
+          - service name
+        description: Name of the specific resource (warehouse, pipe, etc.) consuming credits
+        expr: NAME
+        data_type: TEXT
+    time_dimensions:
+      - name: metering_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of the metering interval
+        expr: START_TIME::DATE
+        data_type: DATE
+      - name: metering_at
+        synonyms:
+          - timestamp
+          - hour
+        description: Exact timestamp of the metering interval
+        expr: START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_credits
+        synonyms:
+          - credits used
+          - cost
+          - spend
+          - bill
+        description: Total credits consumed
+        expr: SUM(CREDITS_USED)
+        data_type: NUMBER
+      - name: compute_credits
+        synonyms:
+          - compute cost
+        description: Credits used for compute
+        expr: SUM(CREDITS_USED_COMPUTE)
+        data_type: NUMBER
+      - name: cloud_service_credits
+        synonyms:
+          - cloud services cost
+        description: Credits used for cloud services
+        expr: SUM(CREDITS_USED_CLOUD_SERVICES)
+        data_type: NUMBER
+
+  - name: metering_daily_history
+    description: >
+      Daily aggregated credit consumption by service type. Use for daily trends,
+      month-over-month comparisons, and billing analysis.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: METERING_DAILY_HISTORY
+    filters:
+      - name: recent_daily
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to the last 30 days
+        expr: USAGE_DATE >= DATEADD('day', -30, CURRENT_DATE())
+    dimensions:
+      - name: service_type
+        synonyms:
+          - service
+          - cost category
+        description: The Snowflake service type
+        expr: SERVICE_TYPE
+        data_type: TEXT
+    time_dimensions:
+      - name: usage_date
+        synonyms:
+          - date
+          - day
+          - when
+        description: The date of usage
+        expr: USAGE_DATE
+        data_type: DATE
+    measures:
+      - name: credits_billed
+        synonyms:
+          - billed credits
+          - daily cost
+        description: Total credits billed for the day
+        expr: SUM(CREDITS_BILLED)
+        data_type: NUMBER
+      - name: credits_used_compute
+        synonyms:
+          - compute credits
+        description: Compute credits used
+        expr: SUM(CREDITS_USED_COMPUTE)
+        data_type: NUMBER
+      - name: credits_used_cloud_services
+        synonyms:
+          - cloud services credits
+        description: Cloud services credits used
+        expr: SUM(CREDITS_USED_CLOUD_SERVICES)
+        data_type: NUMBER
+
+  - name: query_attribution_history
+    description: >
+      Per-query credit attribution showing exactly how many credits each query consumed.
+      Use for identifying expensive queries, top-spending users, and query cost patterns.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: QUERY_ATTRIBUTION_HISTORY
+    filters:
+      - name: recent_attribution
+        synonyms:
+          - recent
+          - last 7 days
+        description: Filters to last 7 days
+        expr: START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+    dimensions:
+      - name: query_id
+        synonyms:
+          - query identifier
+        description: Unique query identifier
+        expr: QUERY_ID
+        data_type: TEXT
+      - name: warehouse_name
+        synonyms:
+          - warehouse
+          - compute
+        description: Warehouse that executed the query
+        expr: WAREHOUSE_NAME
+        data_type: TEXT
+      - name: user_name
+        synonyms:
+          - user
+          - who
+        description: User who ran the query
+        expr: USER_NAME
+        data_type: TEXT
+      - name: query_parameterized_hash
+        synonyms:
+          - query hash
+          - query pattern
+          - parameterized hash
+        description: Hash grouping similar queries together
+        expr: QUERY_PARAMETERIZED_HASH
+        data_type: TEXT
+    time_dimensions:
+      - name: attribution_date
+        synonyms:
+          - date
+          - day
+        description: Date the query ran
+        expr: START_TIME::DATE
+        data_type: DATE
+      - name: attribution_at
+        synonyms:
+          - timestamp
+          - hour
+        description: Exact timestamp
+        expr: START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: credits_attributed_compute
+        synonyms:
+          - query cost
+          - attributed credits
+          - compute credits per query
+        description: Credits attributed to compute for this query
+        expr: SUM(CREDITS_ATTRIBUTED_COMPUTE)
+        data_type: NUMBER
+      - name: credits_query_acceleration
+        synonyms:
+          - QAS credits
+          - acceleration credits
+        description: Credits used for query acceleration service
+        expr: SUM(CREDITS_USED_QUERY_ACCELERATION)
+        data_type: NUMBER
+      - name: total_query_credits
+        synonyms:
+          - total query cost
+          - all query credits
+        description: Total credits per query (compute + acceleration)
+        expr: SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0))
+        data_type: NUMBER
+      - name: query_count
+        synonyms:
+          - number of queries
+        description: Count of queries
+        expr: COUNT(DISTINCT QUERY_ID)
+        data_type: NUMBER
+
+  - name: serverless_task_history
+    description: >
+      Credit consumption by serverless tasks. Use to identify expensive serverless
+      tasks and track their cost over time.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: SERVERLESS_TASK_HISTORY
+    filters:
+      - name: recent_serverless
+        synonyms:
+          - recent
+          - last 7 days
+        description: Filters to last 7 days
+        expr: START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+    dimensions:
+      - name: task_name
+        synonyms:
+          - task
+          - serverless task
+        description: Name of the serverless task
+        expr: TASK_NAME
+        data_type: TEXT
+      - name: database_name
+        synonyms:
+          - database
+        description: Database containing the task
+        expr: DATABASE_NAME
+        data_type: TEXT
+      - name: schema_name
+        synonyms:
+          - schema
+        description: Schema containing the task
+        expr: SCHEMA_NAME
+        data_type: TEXT
+    time_dimensions:
+      - name: task_date
+        synonyms:
+          - date
+          - day
+        description: Date the task ran
+        expr: START_TIME::DATE
+        data_type: DATE
+      - name: task_at
+        synonyms:
+          - timestamp
+        description: Exact timestamp
+        expr: START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_credits
+        synonyms:
+          - credits used
+          - serverless cost
+        description: Total credits consumed by serverless tasks
+        expr: SUM(CREDITS_USED)
+        data_type: NUMBER
+
+  - name: container_services_history
+    description: >
+      Credit consumption by Snowpark Container Services compute pools. Use to identify
+      expensive compute pools and track container costs.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: SNOWPARK_CONTAINER_SERVICES_HISTORY
+    filters:
+      - name: recent_containers
+        synonyms:
+          - recent
+          - last 7 days
+        description: Filters to last 7 days
+        expr: START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+    dimensions:
+      - name: compute_pool_name
+        synonyms:
+          - compute pool
+          - pool
+          - container pool
+        description: Name of the compute pool
+        expr: COMPUTE_POOL_NAME
+        data_type: TEXT
+      - name: application_name
+        synonyms:
+          - application
+          - app
+        description: Application using the compute pool
+        expr: APPLICATION_NAME
+        data_type: TEXT
+    time_dimensions:
+      - name: container_date
+        synonyms:
+          - date
+          - day
+        description: Date of usage
+        expr: START_TIME::DATE
+        data_type: DATE
+      - name: container_at
+        synonyms:
+          - timestamp
+        description: Exact timestamp
+        expr: START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: total_credits
+        synonyms:
+          - credits used
+          - container cost
+          - SPCS cost
+        description: Total credits consumed by container services
+        expr: SUM(CREDITS_USED)
+        data_type: NUMBER
+
+  - name: database_storage_usage
+    description: >
+      Daily storage consumption by database including active data, failsafe, and
+      hybrid table storage. Use to identify storage-heavy databases and growth trends.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: DATABASE_STORAGE_USAGE_HISTORY
+    filters:
+      - name: recent_storage
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to last 30 days
+        expr: USAGE_DATE >= DATEADD('day', -30, CURRENT_DATE())
+    dimensions:
+      - name: database_name
+        synonyms:
+          - database
+          - db
+        description: Name of the database
+        expr: DATABASE_NAME
+        data_type: TEXT
+    time_dimensions:
+      - name: usage_date
+        synonyms:
+          - date
+          - day
+        description: Date of storage measurement
+        expr: USAGE_DATE
+        data_type: DATE
+    measures:
+      - name: total_storage_gb
+        synonyms:
+          - storage size
+          - database size
+          - storage used
+        description: Total storage in gigabytes (database + failsafe + hybrid)
+        expr: ROUND(AVG(AVERAGE_DATABASE_BYTES + AVERAGE_FAILSAFE_BYTES + COALESCE(AVERAGE_HYBRID_TABLE_STORAGE_BYTES, 0)) / POW(1024, 3), 2)
+        data_type: NUMBER
+      - name: database_storage_gb
+        synonyms:
+          - active storage
+        description: Active database storage in gigabytes
+        expr: ROUND(AVG(AVERAGE_DATABASE_BYTES) / POW(1024, 3), 2)
+        data_type: NUMBER
+      - name: failsafe_storage_gb
+        synonyms:
+          - failsafe
+        description: Failsafe storage in gigabytes
+        expr: ROUND(AVG(AVERAGE_FAILSAFE_BYTES) / POW(1024, 3), 2)
+        data_type: NUMBER
+
+  - name: data_transfer_history
+    description: >
+      Data transfer between regions and cloud providers. Use to identify cross-region
+      transfer costs and egress patterns.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: DATA_TRANSFER_HISTORY
+    filters:
+      - name: recent_transfers
+        synonyms:
+          - recent
+          - last 7 days
+        description: Filters to last 7 days
+        expr: START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+    dimensions:
+      - name: target_cloud
+        synonyms:
+          - destination cloud
+          - cloud provider
+        description: Target cloud provider (AWS, Azure, GCP)
+        expr: TARGET_CLOUD
+        data_type: TEXT
+      - name: target_region
+        synonyms:
+          - destination region
+          - region
+        description: Target region
+        expr: TARGET_REGION
+        data_type: TEXT
+      - name: source_cloud
+        synonyms:
+          - origin cloud
+        description: Source cloud provider
+        expr: SOURCE_CLOUD
+        data_type: TEXT
+      - name: source_region
+        synonyms:
+          - origin region
+        description: Source region
+        expr: SOURCE_REGION
+        data_type: TEXT
+      - name: transfer_type
+        synonyms:
+          - type
+          - transfer category
+        description: Type of transfer (COPY, REPLICATION, etc.)
+        expr: TRANSFER_TYPE
+        data_type: TEXT
+    time_dimensions:
+      - name: transfer_date
+        synonyms:
+          - date
+          - day
+        description: Date of transfer
+        expr: START_TIME::DATE
+        data_type: DATE
+    measures:
+      - name: total_gb_transferred
+        synonyms:
+          - data transferred
+          - transfer volume
+          - egress
+        description: Total gigabytes transferred
+        expr: ROUND(SUM(BYTES_TRANSFERRED) / POW(1024, 3), 2)
+        data_type: NUMBER
+      - name: transfer_count
+        synonyms:
+          - number of transfers
+        description: Count of transfer operations
+        expr: COUNT(*)
+        data_type: NUMBER
+
+  - name: automatic_clustering_history
+    description: >
+      Auto-clustering credit consumption by table. Use to identify tables driving
+      clustering expenses and optimize clustering keys.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: AUTOMATIC_CLUSTERING_HISTORY
+    filters:
+      - name: recent_clustering
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to last 30 days
+        expr: START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+    dimensions:
+      - name: database_name
+        synonyms:
+          - database
+        description: Database containing the clustered table
+        expr: DATABASE_NAME
+        data_type: TEXT
+      - name: schema_name
+        synonyms:
+          - schema
+        description: Schema containing the clustered table
+        expr: SCHEMA_NAME
+        data_type: TEXT
+      - name: table_name
+        synonyms:
+          - table
+          - clustered table
+        description: Name of the auto-clustered table
+        expr: TABLE_NAME
+        data_type: TEXT
+    time_dimensions:
+      - name: clustering_date
+        synonyms:
+          - date
+          - day
+        description: Date of clustering activity
+        expr: START_TIME::DATE
+        data_type: DATE
+    measures:
+      - name: total_credits
+        synonyms:
+          - clustering cost
+          - clustering credits
+        description: Total credits consumed by auto-clustering
+        expr: ROUND(SUM(CREDITS_USED), 2)
+        data_type: NUMBER
+      - name: clustering_events
+        synonyms:
+          - number of reclusters
+          - recluster count
+        description: Number of clustering operations
+        expr: COUNT(*)
+        data_type: NUMBER
+
+  - name: access_history
+    description: >
+      Record of which objects and columns were accessed by queries. Use for
+      table popularity, unused table detection, and data governance.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: ACCESS_HISTORY
+    filters:
+      - name: recent_access
+        synonyms:
+          - recent
+          - last 30 days
+        description: Filters to last 30 days
+        expr: QUERY_START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+    dimensions:
+      - name: user_name
+        synonyms:
+          - user
+          - who accessed
+        description: User who ran the query
+        expr: USER_NAME
+        data_type: TEXT
+      - name: query_id
+        synonyms:
+          - query
+        description: Query identifier
+        expr: QUERY_ID
+        data_type: TEXT
+    time_dimensions:
+      - name: access_date
+        synonyms:
+          - date
+          - day
+        description: Date of access
+        expr: QUERY_START_TIME::DATE
+        data_type: DATE
+      - name: access_at
+        synonyms:
+          - timestamp
+        description: Exact timestamp of access
+        expr: QUERY_START_TIME
+        data_type: TIMESTAMP
+    measures:
+      - name: access_count
+        synonyms:
+          - number of accesses
+          - query count
+        description: Number of access events
+        expr: COUNT(*)
+        data_type: NUMBER
+      - name: unique_users
+        synonyms:
+          - distinct users
+          - user count
+        description: Number of distinct users accessing data
+        expr: COUNT(DISTINCT USER_NAME)
+        data_type: NUMBER
+
+  - name: object_dependencies
+    description: >
+      Object dependency graph showing which objects reference other objects.
+      Use for impact analysis and understanding downstream dependencies.
+    base_table:
+      database: SNOWFLAKE
+      schema: ACCOUNT_USAGE
+      table: OBJECT_DEPENDENCIES
+    dimensions:
+      - name: referencing_object
+        synonyms:
+          - downstream object
+          - dependent object
+        description: Object that depends on another
+        expr: REFERENCING_OBJECT_NAME
+        data_type: TEXT
+      - name: referencing_database
+        synonyms:
+          - downstream database
+        description: Database of the dependent object
+        expr: REFERENCING_DATABASE
+        data_type: TEXT
+      - name: referencing_schema
+        synonyms:
+          - downstream schema
+        description: Schema of the dependent object
+        expr: REFERENCING_SCHEMA
+        data_type: TEXT
+      - name: referencing_object_domain
+        synonyms:
+          - downstream type
+          - object type
+        description: Type of the dependent object (TABLE, VIEW, TASK, etc.)
+        expr: REFERENCING_OBJECT_DOMAIN
+        data_type: TEXT
+      - name: referenced_object
+        synonyms:
+          - upstream object
+          - source object
+        description: Object being depended upon
+        expr: REFERENCED_OBJECT_NAME
+        data_type: TEXT
+      - name: referenced_database
+        synonyms:
+          - upstream database
+          - source database
+        description: Database of the source object
+        expr: REFERENCED_DATABASE
+        data_type: TEXT
+      - name: referenced_schema
+        synonyms:
+          - upstream schema
+          - source schema
+        description: Schema of the source object
+        expr: REFERENCED_SCHEMA
+        data_type: TEXT
+    measures:
+      - name: dependency_count
+        synonyms:
+          - number of dependencies
+        description: Count of dependency relationships
+        expr: COUNT(*)
+        data_type: NUMBER
+
   - name: task_history
     description: >
       Historical record of all Snowflake task executions including success,
@@ -1187,3 +1824,262 @@ verified_queries:
         AND STATUS NOT IN ('Loaded', 'Copy already done')
       GROUP BY database_name, schema_name, TABLE_NAME, STATUS
       ORDER BY load_count DESC;
+
+  - name: cost_breakdown_by_service
+    question: What is the cost breakdown by service type? Where is my money going?
+    sql: |
+      SELECT
+        SERVICE_TYPE,
+        ROUND(SUM(CREDITS_USED), 2) AS total_credits,
+        ROUND(SUM(CREDITS_USED) / SUM(SUM(CREDITS_USED)) OVER () * 100, 1) AS percentage_of_total
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      GROUP BY SERVICE_TYPE
+      ORDER BY total_credits DESC;
+
+  - name: bill_high_analysis
+    question: Why is my Snowflake bill so high? What is driving my costs?
+    sql: |
+      SELECT
+        SERVICE_TYPE,
+        ROUND(SUM(CREDITS_USED), 2) AS total_credits,
+        ROUND(SUM(CREDITS_USED) / SUM(SUM(CREDITS_USED)) OVER () * 100, 1) AS pct_of_total
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+      WHERE START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      GROUP BY SERVICE_TYPE
+      ORDER BY total_credits DESC;
+
+  - name: week_over_week_spend
+    question: How did my Snowflake spend change compared to the previous week?
+    sql: |
+      SELECT 'current_week' AS period,
+          ROUND(IFNULL(SUM(CREDITS_USED), 0), 2) AS credits_used
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      UNION ALL
+      SELECT 'previous_week' AS period,
+          ROUND(IFNULL(SUM(CREDITS_USED), 0), 2) AS credits_used
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -14, CURRENT_DATE())
+        AND START_TIME < DATEADD(DAY, -7, CURRENT_DATE());
+
+  - name: daily_credit_trend
+    question: What is the daily credit consumption trend over the last month?
+    sql: |
+      SELECT
+        USAGE_DATE,
+        SERVICE_TYPE,
+        ROUND(CREDITS_BILLED, 2) AS credits_billed,
+        ROUND(CREDITS_USED_COMPUTE, 2) AS compute_credits,
+        ROUND(CREDITS_USED_CLOUD_SERVICES, 2) AS cloud_services_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+      WHERE USAGE_DATE >= DATEADD('day', -30, CURRENT_DATE())
+      ORDER BY USAGE_DATE DESC, credits_billed DESC;
+
+  - name: serverless_task_costs
+    question: Which serverless tasks consumed the most credits?
+    sql: |
+      SELECT
+        TASK_NAME,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        ROUND(SUM(CREDITS_USED), 4) AS total_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+      WHERE START_TIME >= DATEADD('day', -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      GROUP BY TASK_NAME, DATABASE_NAME, SCHEMA_NAME
+      ORDER BY total_credits DESC;
+
+  - name: container_services_costs
+    question: Which compute pools or container services consumed the most credits?
+    sql: |
+      SELECT
+        COMPUTE_POOL_NAME,
+        ROUND(SUM(CREDITS_USED), 2) AS total_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      GROUP BY COMPUTE_POOL_NAME
+      ORDER BY total_credits DESC
+      LIMIT 10;
+
+  - name: storage_by_database
+    question: Which databases use the most storage?
+    sql: |
+      SELECT
+        DATABASE_NAME,
+        ROUND(AVG(AVERAGE_DATABASE_BYTES + AVERAGE_FAILSAFE_BYTES + COALESCE(AVERAGE_HYBRID_TABLE_STORAGE_BYTES, 0)) / POW(1024, 3), 2) AS avg_total_storage_gb
+      FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+      WHERE USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE())
+        AND USAGE_DATE < CURRENT_DATE()
+      GROUP BY DATABASE_NAME
+      ORDER BY avg_total_storage_gb DESC
+      LIMIT 20;
+
+  - name: data_transfer_by_region
+    question: How much data was transferred by region and transfer type?
+    sql: |
+      SELECT
+        TARGET_CLOUD,
+        TARGET_REGION,
+        TRANSFER_TYPE,
+        COUNT(*) AS transfer_count,
+        ROUND(SUM(BYTES_TRANSFERRED) / POW(1024, 3), 2) AS total_gb_transferred
+      FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+      GROUP BY TARGET_CLOUD, TARGET_REGION, TRANSFER_TYPE
+      ORDER BY total_gb_transferred DESC;
+
+  - name: clustering_costs
+    question: Which tables are driving auto-clustering expenses?
+    sql: |
+      SELECT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        TABLE_NAME,
+        ROUND(SUM(CREDITS_USED), 2) AS total_clustering_credits,
+        COUNT(*) AS clustering_events
+      FROM SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY
+      WHERE START_TIME >= DATEADD('month', -1, CURRENT_DATE())
+      GROUP BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
+      ORDER BY total_clustering_credits DESC
+      LIMIT 20;
+
+  - name: top_users_by_query_cost
+    question: Which users are spending the most on queries by attributed credits?
+    sql: |
+      SELECT
+        USER_NAME,
+        COUNT(DISTINCT QUERY_ID) AS query_count,
+        ROUND(SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)), 2) AS total_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+      GROUP BY USER_NAME
+      ORDER BY total_credits DESC
+      LIMIT 20;
+
+  - name: most_expensive_query_patterns
+    question: What are the most expensive query patterns by parameterized hash?
+    sql: |
+      SELECT
+        QUERY_PARAMETERIZED_HASH,
+        ROUND(SUM(CREDITS_ATTRIBUTED_COMPUTE), 2) AS total_credits,
+        COUNT(QUERY_ID) AS execution_count,
+        ROUND(SUM(CREDITS_ATTRIBUTED_COMPUTE) / NULLIF(COUNT(QUERY_ID), 0), 4) AS avg_credits_per_execution,
+        ANY_VALUE(QUERY_ID) AS example_query_id
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE()
+        AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+      GROUP BY QUERY_PARAMETERIZED_HASH
+      ORDER BY total_credits DESC
+      LIMIT 10;
+
+  - name: cost_increase_analysis
+    question: Why has my cost increased? Which services increased month over month?
+    sql: |
+      WITH monthly_service_costs AS (
+          SELECT DATE_TRUNC('month', START_TIME) AS cost_month, SERVICE_TYPE, SUM(CREDITS_USED) AS total_credits
+          FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+          WHERE START_TIME >= DATE_TRUNC('month', DATEADD('month', -2, CURRENT_DATE()))
+          GROUP BY DATE_TRUNC('month', START_TIME), SERVICE_TYPE
+      ),
+      service_comparison AS (
+          SELECT SERVICE_TYPE,
+              SUM(CASE WHEN cost_month = DATE_TRUNC('month', CURRENT_DATE()) THEN total_credits ELSE 0 END) AS current_month_credits,
+              SUM(CASE WHEN cost_month = DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE())) THEN total_credits ELSE 0 END) AS previous_month_credits
+          FROM monthly_service_costs
+          GROUP BY SERVICE_TYPE
+      )
+      SELECT SERVICE_TYPE,
+          ROUND(current_month_credits, 2) AS current_month_credits,
+          ROUND(previous_month_credits, 2) AS previous_month_credits,
+          ROUND(current_month_credits - previous_month_credits, 2) AS credit_increase,
+          CASE WHEN previous_month_credits > 0
+              THEN ROUND(((current_month_credits - previous_month_credits) / previous_month_credits) * 100, 2)
+              ELSE NULL END AS percentage_increase
+      FROM service_comparison
+      WHERE current_month_credits > previous_month_credits
+      ORDER BY credit_increase DESC;
+
+  - name: total_credits_last_week
+    question: How many total credits were used last week?
+    sql: |
+      SELECT
+        ROUND(SUM(CREDITS_USED), 2) AS total_credits
+      FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+      WHERE START_TIME >= DATEADD(DAY, -7, CURRENT_DATE())
+        AND START_TIME < CURRENT_DATE();
+
+  - name: table_popularity_by_access
+    question: Which tables are the most popular or most accessed?
+    sql: |
+      SELECT
+        DIRECTOBJECTS_ACCESSED.value:objectName::STRING AS table_name,
+        DIRECTOBJECTS_ACCESSED.value:objectDomain::STRING AS object_type,
+        COUNT(DISTINCT QUERY_ID) AS access_count,
+        COUNT(DISTINCT USER_NAME) AS unique_users,
+        MAX(QUERY_START_TIME) AS last_accessed
+      FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY,
+        LATERAL FLATTEN(input => DIRECT_OBJECTS_ACCESSED) AS DIRECTOBJECTS_ACCESSED
+      WHERE QUERY_START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+        AND DIRECTOBJECTS_ACCESSED.value:objectDomain::STRING = 'Table'
+      GROUP BY table_name, object_type
+      ORDER BY access_count DESC
+      LIMIT 20;
+
+  - name: unused_tables
+    question: Which tables haven't been accessed recently and might be stale?
+    sql: |
+      SELECT
+        TABLE_CATALOG AS database_name,
+        TABLE_SCHEMA AS schema_name,
+        TABLE_NAME,
+        LAST_ALTERED,
+        ROW_COUNT,
+        ROUND(BYTES / POW(1024, 3), 2) AS size_gb
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES
+      WHERE DELETED IS NULL
+        AND TABLE_TYPE = 'BASE TABLE'
+        AND LAST_ALTERED < DATEADD('day', -90, CURRENT_DATE())
+        AND BYTES > 0
+      ORDER BY BYTES DESC
+      LIMIT 20;
+
+  - name: object_dependencies_downstream
+    question: What objects depend on or are downstream of a given table?
+    sql: |
+      SELECT
+        REFERENCING_DATABASE AS downstream_database,
+        REFERENCING_SCHEMA AS downstream_schema,
+        REFERENCING_OBJECT_NAME AS downstream_object,
+        REFERENCING_OBJECT_DOMAIN AS object_type,
+        REFERENCED_DATABASE AS source_database,
+        REFERENCED_SCHEMA AS source_schema,
+        REFERENCED_OBJECT_NAME AS source_object
+      FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
+      WHERE REFERENCED_DATABASE IS NOT NULL
+      ORDER BY REFERENCED_OBJECT_NAME, REFERENCING_OBJECT_NAME
+      LIMIT 50;
+
+  - name: recent_schema_changes
+    question: What tables or columns were recently created or altered?
+    sql: |
+      SELECT
+        TABLE_CATALOG AS database_name,
+        TABLE_SCHEMA AS schema_name,
+        TABLE_NAME,
+        TABLE_TYPE,
+        CREATED,
+        LAST_ALTERED,
+        ROW_COUNT,
+        ROUND(BYTES / POW(1024, 3), 3) AS size_gb
+      FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES
+      WHERE DELETED IS NULL
+        AND LAST_ALTERED >= DATEADD('day', -7, CURRENT_DATE())
+      ORDER BY LAST_ALTERED DESC
+      LIMIT 30;

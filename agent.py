@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
 import re
-import requests
 import _snowflake  # type: ignore  — Snowflake-internal, not resolvable locally
 from typing import Generator
 import pandas as pd
@@ -9,7 +8,7 @@ import pandas as pd
 from tools import TOOL_DISPLAY_NAMES, execute_tool
 
 MAX_ITERATIONS = 5
-_SEMANTIC_MODEL = "@PIPELINE_MONITOR.TASKS.CORTEX_STAGE/semantic_model.yaml"
+_SEMANTIC_MODEL = "@ANALYTICS.STREAMLIT_APPS.CORTEX_STAGE/semantic_model.yaml"
 
 _SYSTEM = (
     "You are a senior Snowflake data platform engineer. "
@@ -18,17 +17,20 @@ _SYSTEM = (
     "query_data retrieves factual metrics only — counts, aggregates, and trends from database tables. "
     "NEVER call query_data asking for recommendations, optimizations, or suggestions — "
     "those are your job to synthesize after reviewing the data. "
-    "Available data domains you can query: "
-    "task/pipeline reliability (failure rates, durations, auto-suspensions), "
-    "warehouse credits (total spend, daily trends, idle warehouses), "
-    "query performance (slowest queries, data scanned, cache hits, queue times), "
-    "Snowpipe ingestion (credits, file volumes, daily trends), "
-    "dynamic table refreshes (failure rates, durations), "
-    "COPY bulk loads (success rates, rows loaded). "
-    "Call query_data once per data domain — ask one focused, single-concept factual question per domain. "
-    "Do not combine multiple metrics into one question — ask for the most important metric only. "
-    "Never call query_data multiple times for the same domain. "
-    "For broad health checks, call once per relevant domain. "
+    "The six data domains are: "
+    "(1) pipeline health — task failure rates, durations, auto-suspensions; "
+    "(2) warehouse credits — total compute spend, idle warehouses, daily trends; "
+    "(3) query performance — slowest queries, data scanned, cache hits, queue times; "
+    "(4) Snowpipe ingestion — pipe credits, file volumes, daily trends; "
+    "(5) dynamic table refreshes — failure rates, durations; "
+    "(6) COPY bulk loads — rows loaded, success rates. "
+    "Each query_data call must ask for exactly one specific metric — never combine multiple metrics into one question. "
+    "Always phrase questions as 'What is...', 'Which...', 'How many...', or 'What are...' — never as 'Are there any...', 'Do we have...', or 'Is there...'. "
+    "You may call query_data multiple times for different metrics, including within the same domain. "
+    "Never repeat the same metric twice. "
+    "For cost questions, always cover both (2) warehouse credits AND (3) query performance — data scan volume is a major cost driver. "
+    "For health or reliability questions, always cover (1) pipeline health AND at least one other relevant domain. "
+    "For broad questions, cover every domain that could be relevant. "
     "Lead with the most critical finding, cite specific numbers from the data, "
     "and end with 2-3 actionable recommendations. "
     "If a question is ambiguous, ask a clarifying question before querying."
@@ -69,11 +71,11 @@ _OAI_TOOLS = [
 
 _DOMAIN_LABELS = [
     (re.compile(r"task|pipeline|job|fail|suspend|scheduled", re.I), "Pipeline Health"),
-    (re.compile(r"warehouse|credit|cost|spend|idle|compute", re.I), "Warehouse Credits"),
-    (re.compile(r"quer(y|ies)|slow|scan|cache|execution", re.I), "Query Performance"),
     (re.compile(r"pipe|snowpipe|ingest", re.I), "Snowpipe Ingestion"),
-    (re.compile(r"dynamic.table|refresh|upstream|transform", re.I), "Transform Health"),
     (re.compile(r"copy|load|bulk|row", re.I), "Load Health"),
+    (re.compile(r"quer(y|ies)|slow|scan|cache|execution", re.I), "Query Performance"),
+    (re.compile(r"dynamic.table|refresh|upstream|transform", re.I), "Transform Health"),
+    (re.compile(r"warehouse|credit|cost|spend|idle|compute", re.I), "Warehouse Credits"),
 ]
 
 
@@ -221,7 +223,7 @@ def _extract_hours(q: str) -> int:
     m = re.search(r"last\s+(\d+)\s+day", q)
     if m:
         return int(m.group(1)) * 24
-    if re.search(r"last\s+week|last\s+7\s+day", q):
+    if re.search(r"last\s+week|this\s+week|last\s+7\s+day", q):
         return 168
     if re.search(r"last\s+month|last\s+30\s+day", q):
         return 720
@@ -244,7 +246,7 @@ def _route(question: str) -> list[dict]:
             focus = "failures"
         tools.append({"name": "query_task_health", "inputs": {"focus": focus, "time_window_hours": hours}})
 
-    if re.search(r"warehouse|credit|cost|spend|idle|underutil|expensiv|burn|budget|compute", q):
+    if re.search(r"warehouse|credit|cost|spend|idle|underutil|expensiv|burn|budget|compute|bill", q):
         if re.search(r"idle|underutil", q):
             focus = "idle"
         elif re.search(r"trend|over.time|daily|histor", q):
@@ -287,6 +289,23 @@ def _route(question: str) -> list[dict]:
         else:
             focus = "all"
         tools.append({"name": "query_transformation_health", "inputs": {"focus": focus, "time_window_hours": hours}})
+
+    if re.search(r"storage|database.*size|table.*size|failsafe|time.travel", q):
+        focus = "top_tables" if re.search(r"table", q) else "top_databases"
+        tools.append({"name": "query_storage", "inputs": {"focus": focus, "time_window_hours": hours}})
+
+    if re.search(r"container|snowpark.*container|compute.*pool", q):
+        tools.append({"name": "query_containers", "inputs": {"focus": "top_pools", "time_window_hours": hours}})
+
+    if re.search(r"serverless", q):
+        tools.append({"name": "query_serverless", "inputs": {"focus": "top_tasks", "time_window_hours": hours}})
+
+    if re.search(r"data.transfer|egress|replication.*cost|transfer.*credit", q):
+        tools.append({"name": "query_data_transfer", "inputs": {"focus": "all", "time_window_hours": hours}})
+
+    if re.search(r"which.user|top.user|per.user|by.user|who.*spend|who.*cost", q):
+        focus = "by_warehouse" if re.search(r"warehouse", q) else "top_spenders"
+        tools.append({"name": "query_users", "inputs": {"focus": focus, "time_window_hours": hours}})
 
     if re.search(r"breakdown|where.*money|total.*cost|overall.*cost|attribution|transfer", q) \
             and not any(t["name"] == "query_warehouse_efficiency" for t in tools):
@@ -359,13 +378,141 @@ def _run_fallback(question: str, session) -> Generator[dict, None, None]:
         yield {"type": "answer", "text": answer, "model": synth_model}
 
 
+# ── Cortex Agents primary path ────────────────────────────────────────────────
+
+_AGENTS_SYSTEM = (
+    "You are a senior Snowflake data platform engineer. "
+    "Use the analyst tool to fetch live data before answering any operational question. "
+    "The analyst tool queries factual metrics only — never ask it for recommendations or optimizations. "
+    "Call the analyst tool once per data domain, one focused metric per call. "
+    "Always phrase questions as 'What is...', 'Which...', 'How many...', or 'What are...' — "
+    "never 'Are there any...' or 'Do we have...'. "
+    "Available domains: "
+    "(1) pipeline health — task failure rates, durations, auto-suspensions; "
+    "(2) warehouse credits — compute spend, idle warehouses, daily trends; "
+    "(3) query performance — slowest queries, data scanned, cache hits, queue times; "
+    "(4) Snowpipe ingestion — pipe credits, file volumes; "
+    "(5) dynamic table refreshes — failure rates, durations; "
+    "(6) COPY bulk loads — rows loaded, success rates. "
+    "For cost questions, always cover both (2) and (3). "
+    "For health questions, always cover (1) and at least one other domain. "
+    "For broad questions, cover every relevant domain. "
+    "Lead with the most critical finding, cite specific numbers, and end with 2-3 actionable recommendations."
+)
+
+
+def _build_agents_messages(question: str, history: list[dict]) -> list[dict]:
+    messages: list[dict] = [{"role": "user", "content": [{"type": "text", "text": _AGENTS_SYSTEM}]},
+                             {"role": "assistant", "content": [{"type": "text", "text": "Understood."}]}]
+    for msg in history:
+        if msg["role"] == "user":
+            messages.append({"role": "user", "content": [{"type": "text", "text": msg["content"]}]})
+        elif msg["role"] == "assistant" and msg.get("answer"):
+            messages.append({"role": "assistant", "content": [{"type": "text", "text": msg["answer"]}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": question}]})
+    return messages
+
+
+def _run_cortex_agents(question: str, history: list[dict], session) -> Generator[dict, None, None]:
+    resp = _snowflake.send_snow_api_request(
+        "POST",
+        "/api/v2/cortex/agent:run",
+        {},
+        {},
+        {
+            "models": {"orchestration": "claude-4-sonnet"},
+            "messages": _build_agents_messages(question, history),
+            "tools": [{"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "analyst"}}],
+            "tool_resources": {
+                "analyst": {
+                    "semantic_model_file": _SEMANTIC_MODEL,
+                    "execution_environment": {
+                        "type": "warehouse",
+                        "warehouse": "COMPUTE_WH"
+                    }
+                }
+            },
+            "stream": False,
+        },
+        None,
+        90000,
+    )
+
+    if resp["status"] >= 400:
+        raise RuntimeError(f"Cortex Agents {resp['status']}: {resp['content'][:300]}")
+
+    data = json.loads(resp["content"]) if isinstance(resp["content"], str) else resp["content"]
+    content = data.get("content", [])
+    answer_parts: list[str] = []
+    pending_question = question
+
+    for block in content:
+        btype = block.get("type")
+
+        if btype == "thinking":
+            continue
+
+        elif btype == "tool_use":
+            tool_input = block.get("tool_use", {}).get("input") or block.get("input", {})
+            pending_question = tool_input.get("query") or tool_input.get("question") or question
+            yield {
+                "type": "tool_call",
+                "name": "analyst",
+                "display_name": _skill_label(pending_question),
+                "inputs": {"question": pending_question},
+            }
+
+        elif btype == "tool_result":
+            df = pd.DataFrame()
+            tool_result = block.get("tool_result", {})
+            content_items = tool_result.get("content", [])
+            try:
+                for item in content_items:
+                    if not isinstance(item, dict) or item.get("type") != "json":
+                        continue
+                    raw = item.get("json", {})
+                    if isinstance(raw, list):
+                        df = pd.DataFrame(raw)
+                    elif isinstance(raw, dict):
+                        result_set = raw.get("result_set", {})
+                        if "data" in result_set:
+                            rows = result_set["data"]
+                            meta = result_set.get("resultSetMetaData", {})
+                            col_names = [col["name"] for col in meta.get("rowType", [])]
+                            df = pd.DataFrame(rows, columns=col_names if col_names else None)
+                        elif "data" in raw:
+                            df = pd.DataFrame(raw["data"])
+                    if not df.empty:
+                        break
+            except Exception:
+                pass
+            yield {
+                "type": "tool_result",
+                "name": "analyst",
+                "display_name": _skill_label(pending_question),
+                "df": df,
+                "description": pending_question,
+                "rows": len(df),
+                "tool_use_id": "",
+            }
+    
+        elif btype == "text":
+            answer_parts.append(block.get("text", ""))
+
+    yield {
+        "type": "answer",
+        "text": "\n".join(answer_parts).strip() or "Analysis complete.",
+        "model": "claude-4-sonnet",
+    }
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 def run_agent(question: str, history: list[dict], session) -> Generator[dict, None, None]:
     """
-    Primary: Claude (claude-4-sonnet) via Cortex Chat Completions drives the agentic loop.
-             query_data() routes through Cortex Analyst → dynamic SQL from semantic model.
-    Fallback: keyword routing + hardcoded SQL (tools.py) + llama synthesis.
+    Primary:   Cortex Agents (/api/v2/cortex/agent:run) with Cortex Analyst as built-in tool.
+    Secondary: Claude via Chat Completions + manual agentic loop.
+    Fallback:  Keyword routing + hardcoded SQL (tools.py) + llama synthesis.
 
     Yields event dicts:
       {"type": "tool_call",   "name": str, "display_name": str, "inputs": dict}
@@ -375,7 +522,11 @@ def run_agent(question: str, history: list[dict], session) -> Generator[dict, No
       {"type": "error",       "text": str}
     """
     try:
-        yield from _run_chat_completions(question, history, session)
+        yield from _run_cortex_agents(question, history, session)
     except Exception as exc:
-        yield {"type": "error", "text": f"[Primary failed, using fallback] {exc}"}
-        yield from _run_fallback(question, session)
+        yield {"type": "error", "text": f"[Cortex Agents failed, trying Chat Completions] {exc}"}
+        try:
+            yield from _run_chat_completions(question, history, session)
+        except Exception as exc2:
+            yield {"type": "error", "text": f"[Chat Completions failed, using fallback] {exc2}"}
+            yield from _run_fallback(question, session)

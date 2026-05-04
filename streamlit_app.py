@@ -64,15 +64,28 @@ st.markdown(
 
 # ── Chart helper ───────────────────────────────────────────────────────────────
 
-def _render_chart(df: pd.DataFrame):
-    if df.empty:
-        return
-    # Convert epoch-ms string columns to readable dates (Cortex Analyst DATE serialization)
+def _fix_timestamps(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in df.select_dtypes(include="object").columns:
         sample = df[col].dropna().head(5)
-        if len(sample) > 0 and all(isinstance(v, str) and v.isdigit() and len(v) >= 12 for v in sample):
-            df[col] = pd.to_datetime(df[col].astype("int64"), unit="ms").dt.strftime("%Y-%m-%d")
+        if len(sample) == 0:
+            continue
+        if all(isinstance(v, str) and v.replace(".", "").replace("-", "").isdigit() for v in sample):
+            try:
+                numeric_vals = pd.to_numeric(df[col])
+                if numeric_vals.max() > 1e12:
+                    df[col] = pd.to_datetime(numeric_vals, unit="ms").dt.strftime("%Y-%m-%d %H:%M")
+                elif numeric_vals.max() > 1e9:
+                    df[col] = pd.to_datetime(numeric_vals, unit="s").dt.strftime("%Y-%m-%d %H:%M")
+                else:
+                    df[col] = numeric_vals
+            except (ValueError, TypeError):
+                pass
+    return df
+    
+def _render_chart(df: pd.DataFrame):
+    if df.empty:
+        return
     numeric = df.select_dtypes(include="number").columns.tolist()
     text = df.select_dtypes(include="object").columns.tolist()
     if not numeric or not text:
@@ -104,8 +117,8 @@ def _render_history_message(msg: dict):
                 st.markdown(line)
 
     for tr in msg.get("tool_results", []):
-        st.caption(tr["description"] or tr["display_name"])
-        df = pd.DataFrame(tr["data"])
+        st.caption(tr["display_name"])
+        df = _fix_timestamps(pd.DataFrame(tr["data"]))
         if not df.empty:
             _render_chart(df)
             st.dataframe(df, use_container_width=True)
@@ -124,24 +137,45 @@ def _render_history_message(msg: dict):
 # ── Replay history ─────────────────────────────────────────────────────────────
 
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        if msg["role"] == "user":
-            st.write(msg["content"])
-        else:
+    if msg["role"] == "user":
+        st.markdown(
+            f"<div style='background:#1C2B3A; border-left:3px solid #29B5E8; "
+            f"padding:10px 14px; border-radius:4px; margin:8px 0'>"
+            f"<span style='color:#888; font-size:11px; text-transform:uppercase; letter-spacing:1px'>You</span>"
+            f"<br><span style='color:#eee'>{msg['content']}</span></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        with st.container():
             _render_history_message(msg)
 
 
 # ── Chat input + live agent run ────────────────────────────────────────────────
 
-question = st.chat_input("Ask about your Snowflake environment...")
+with st.form("chat_form", clear_on_submit=True):
+    cols = st.columns([9, 1])
+    with cols[0]:
+        q_input = st.text_input(
+            "", placeholder="Ask about your Snowflake environment...",
+            label_visibility="collapsed",
+        )
+    with cols[1]:
+        submitted = st.form_submit_button("Send", use_container_width=True)
+
+question = q_input.strip() if submitted and q_input.strip() else None
 
 if "pending_question" in st.session_state:
     question = st.session_state.pop("pending_question")
 
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.write(question)
+    st.markdown(
+        f"<div style='background:#1C2B3A; border-left:3px solid #29B5E8; "
+        f"padding:10px 14px; border-radius:4px; margin:8px 0'>"
+        f"<span style='color:#888; font-size:11px; text-transform:uppercase; letter-spacing:1px'>You</span>"
+        f"<br><span style='color:#eee'>{question}</span></div>",
+        unsafe_allow_html=True,
+    )
 
     assistant_record: dict = {
         "role": "assistant",
@@ -154,7 +188,7 @@ if question:
         "model": "",
     }
 
-    with st.chat_message("assistant"):
+    with st.container():
         trace_container = st.empty()
         result_sections: list[dict] = []
 
@@ -201,10 +235,11 @@ if question:
                     st.markdown(line)
 
         for ev in result_sections:
-            st.caption(ev["description"] or ev["display_name"])
+            st.caption(ev["display_name"])
             if not ev["df"].empty:
-                _render_chart(ev["df"])
-                st.dataframe(ev["df"], use_container_width=True)
+                df = _fix_timestamps(ev["df"])
+                _render_chart(df)
+                st.dataframe(df, use_container_width=True)
             else:
                 st.info("No data returned.")
 

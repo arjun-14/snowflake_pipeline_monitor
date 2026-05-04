@@ -1,643 +1,371 @@
 from __future__ import annotations
 import pandas as pd
 
-# ── Tool schemas (Anthropic Messages API format for Cortex COMPLETE) ──────────
-
-TOOL_SCHEMAS = [
-    {
-        "name": "query_task_health",
-        "description": (
-            "Analyze Snowflake task and pipeline execution health. Returns failure rates, "
-            "durations, auto-suspensions, and error patterns from TASK_HISTORY. "
-            "Use when asked about pipelines, tasks, job failures, or data pipeline reliability."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {
-                    "type": "number",
-                    "description": "Hours back to look. Default 24. Use 168 for last week.",
-                },
-                "limit": {"type": "integer", "description": "Max rows. Default 20."},
-                "focus": {
-                    "type": "string",
-                    "enum": ["failures", "duration", "flaky", "all"],
-                    "description": (
-                        "'failures' = worst failure rates, 'duration' = slowest tasks, "
-                        "'flaky' = intermittently failing, 'all' = general overview."
-                    ),
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_warehouse_efficiency",
-        "description": (
-            "Analyze warehouse credit consumption, utilization, and efficiency from "
-            "WAREHOUSE_METERING_HISTORY. Use when asked about costs, credits, warehouse "
-            "usage, compute spend, or idle warehouses."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {"type": "number", "description": "Hours back to look. Default 24."},
-                "limit": {"type": "integer", "description": "Max rows. Default 20."},
-                "focus": {
-                    "type": "string",
-                    "enum": ["most_expensive", "idle", "trend", "all"],
-                    "description": (
-                        "'most_expensive' = top credit consumers, 'idle' = underutilized, "
-                        "'trend' = daily credit trend, 'all' = overview."
-                    ),
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_performance",
-        "description": (
-            "Analyze query execution performance including slow queries, cache hit rate, and "
-            "data scanned from QUERY_HISTORY. Use when asked about query speed, performance "
-            "bottlenecks, cache efficiency, or heavy data-scanning queries."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {"type": "number", "description": "Hours back to look. Default 24."},
-                "limit": {"type": "integer", "description": "Max rows. Default 20."},
-                "focus": {
-                    "type": "string",
-                    "enum": ["slowest", "most_data_scanned", "failed", "cache_misses", "all"],
-                    "description": "Aspect to focus on.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_ingestion_health",
-        "description": (
-            "Analyze data ingestion health from PIPE_USAGE_HISTORY (Snowpipe) and COPY_HISTORY "
-            "(bulk COPY INTO). Returns pipe credit usage, files inserted, load success rates. "
-            "Use when asked about data ingestion, Snowpipe, data loading, or raw data freshness."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {"type": "number", "description": "Hours back to look. Default 24."},
-                "limit": {"type": "integer", "description": "Max rows. Default 20."},
-                "focus": {
-                    "type": "string",
-                    "enum": ["pipe_usage", "copy_loads", "failed_loads", "all"],
-                    "description": "Which ingestion mechanism to focus on.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_transformation_health",
-        "description": (
-            "Analyze dynamic table refresh health from DYNAMIC_TABLE_REFRESH_HISTORY. Returns "
-            "refresh failures, lag, upstream failures, and refresh duration. Use when asked about "
-            "dynamic tables, transformation health, data freshness, or downstream pipeline delays."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {"type": "number", "description": "Hours back to look. Default 24."},
-                "limit": {"type": "integer", "description": "Max rows. Default 20."},
-                "focus": {
-                    "type": "string",
-                    "enum": ["failures", "slowest", "upstream_failures", "all"],
-                    "description": "What to focus on.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_cost_breakdown",
-        "description": (
-            "Cross-domain cost breakdown combining warehouse compute credits "
-            "(WAREHOUSE_METERING_HISTORY) and data transfer costs (DATA_TRANSFER_HISTORY). "
-            "Use when asked about total spend, cost attribution, budget, or where money is going."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {
-                    "type": "number",
-                    "description": "Hours back to look. Default 168 (last week).",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_ecosystem_anomalies",
-        "description": (
-            "Detect signals and anomalies across all domains simultaneously: task failures, "
-            "warehouse credit spikes, query failures, load failures, and dynamic table failures. "
-            "Use when asked about anomalies, incidents, root causes, 'what went wrong', or a "
-            "full ecosystem health check."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "time_window_hours": {
-                    "type": "number",
-                    "description": "Hours back to scan for anomalies. Default 24.",
-                },
-            },
-            "required": [],
-        },
-    },
-]
-
 TOOL_DISPLAY_NAMES = {
-    "query_task_health": "Pipeline & Task Health",
-    "query_warehouse_efficiency": "Warehouse Efficiency",
+    "query_warehouse_efficiency": "Warehouse Credits",
     "query_performance": "Query Performance",
-    "query_ingestion_health": "Data Ingestion Health",
-    "query_transformation_health": "Transformation Health",
+    "query_task_health": "Pipeline Health",
+    "query_ingestion_health": "Ingestion Health",
+    "query_transformation_health": "Transform Health",
     "query_cost_breakdown": "Cost Breakdown",
     "query_ecosystem_anomalies": "Ecosystem Anomalies",
+    "query_storage": "Storage",
+    "query_containers": "Containers",
+    "query_serverless": "Serverless Tasks",
+    "query_data_transfer": "Data Transfer",
+    "query_users": "User Spending",
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+_WAREHOUSE_QUERIES = {
+    "most_expensive": """
+SELECT warehouse_name, warehouse_id, ROUND(SUM(credits_used), 2) AS credits
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE start_time >= DATEADD(DAY, -{days}, CURRENT_DATE()) AND start_time < CURRENT_DATE()
+GROUP BY warehouse_name, warehouse_id
+ORDER BY credits DESC
+LIMIT 100""",
+    "idle": """
+WITH recent AS (
+    SELECT warehouse_name, SUM(credits_used) AS credits
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE start_time >= DATEADD(DAY, -{days}, CURRENT_DATE())
+    GROUP BY warehouse_name
+),
+prior AS (
+    SELECT warehouse_name, SUM(credits_used) AS credits
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE start_time >= DATEADD(DAY, -{prior_days}, CURRENT_DATE())
+        AND start_time < DATEADD(DAY, -{days}, CURRENT_DATE())
+    GROUP BY warehouse_name
+)
+SELECT
+    COALESCE(r.warehouse_name, p.warehouse_name) AS warehouse_name,
+    ROUND(COALESCE(p.credits, 0), 2) AS prior_period,
+    ROUND(COALESCE(r.credits, 0), 2) AS recent_period,
+    ROUND(COALESCE(r.credits, 0) - COALESCE(p.credits, 0), 2) AS change,
+    ROUND(((COALESCE(r.credits, 0) - COALESCE(p.credits, 0)) / NULLIF(p.credits, 0)) * 100, 1) AS pct_change
+FROM recent r
+FULL OUTER JOIN prior p ON r.warehouse_name = p.warehouse_name
+ORDER BY recent_period ASC
+LIMIT 15""",
+    "trend": """
+SELECT DATE_TRUNC('DAY', start_time) AS day, ROUND(SUM(credits_used), 2) AS credits
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE start_time >= DATEADD(DAY, -{days}, CURRENT_DATE()) AND start_time < CURRENT_DATE()
+GROUP BY day
+ORDER BY day""",
+}
 
-def _hours(val, default: int = 24) -> int:
-    return int(val) if val else default
+_PERFORMANCE_QUERIES = {
+    "slowest": """
+SELECT query_id, warehouse_name, user_name,
+    ROUND(credits_attributed_compute, 2) AS credits_compute,
+    ROUND(credits_used_query_acceleration, 2) AS credits_qas, start_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    AND credits_attributed_compute > 0
+ORDER BY credits_attributed_compute DESC
+LIMIT 15""",
+    "most_data_scanned": """
+SELECT query_id, query_type, warehouse_name, user_name,
+    ROUND(bytes_scanned / POW(1024, 3), 2) AS gb_scanned,
+    total_elapsed_time / 1000 AS elapsed_seconds
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND bytes_scanned > 0
+ORDER BY bytes_scanned DESC
+LIMIT 20""",
+    "failed": """
+SELECT query_id, query_type, warehouse_name, user_name, error_code, error_message, start_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND execution_status = 'FAIL'
+ORDER BY start_time DESC
+LIMIT 20""",
+    "cache_misses": """
+SELECT warehouse_name, COUNT(*) AS total_queries,
+    SUM(CASE WHEN bytes_scanned > 0 THEN 1 ELSE 0 END) AS cache_misses,
+    ROUND(SUM(CASE WHEN bytes_scanned > 0 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS miss_pct
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND warehouse_name IS NOT NULL
+GROUP BY warehouse_name
+ORDER BY miss_pct DESC
+LIMIT 15""",
+    "all": """
+SELECT query_parameterized_hash,
+    ROUND(SUM(credits_attributed_compute), 2) AS total_credits,
+    COUNT(query_id) AS execution_count,
+    ROUND(SUM(credits_attributed_compute) / NULLIF(COUNT(query_id), 0), 4) AS avg_credits_per_execution,
+    ANY_VALUE(query_id) AS example_query_id
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND query_parameterized_hash IS NOT NULL
+GROUP BY query_parameterized_hash
+ORDER BY total_credits DESC
+LIMIT 10""",
+}
+
+_TASK_HEALTH_QUERIES = {
+    "failures": """
+SELECT name, database_name, schema_name, state, error_code, error_message, scheduled_time, completed_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE scheduled_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND state = 'FAILED'
+ORDER BY scheduled_time DESC
+LIMIT 20""",
+    "duration": """
+SELECT name, database_name, schema_name, COUNT(*) AS run_count,
+    ROUND(AVG(DATEDIFF('second', query_start_time, completed_time)), 1) AS avg_duration_sec,
+    ROUND(MAX(DATEDIFF('second', query_start_time, completed_time)), 1) AS max_duration_sec
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE scheduled_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND state = 'SUCCEEDED'
+GROUP BY name, database_name, schema_name
+ORDER BY avg_duration_sec DESC
+LIMIT 15""",
+    "flaky": """
+SELECT name, database_name, schema_name, COUNT(*) AS total_runs,
+    SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) AS failures,
+    ROUND(SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS failure_rate_pct
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE scheduled_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY name, database_name, schema_name
+HAVING total_runs >= 3 AND failures >= 1 AND failure_rate_pct BETWEEN 10 AND 90
+ORDER BY failure_rate_pct DESC
+LIMIT 15""",
+}
+
+_INGESTION_QUERIES = {
+    "all": """
+SELECT pipe_name, pipe_catalog_name AS database_name,
+    ROUND(SUM(credits_used), 2) AS credits, SUM(files_inserted) AS files, SUM(bytes_inserted) AS bytes_inserted
+FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY pipe_name, pipe_catalog_name
+ORDER BY credits DESC
+LIMIT 20""",
+    "failed_loads": """
+SELECT table_catalog_name AS database_name, table_schema_name AS schema_name,
+    table_name, file_name, status, error_count, first_error_message, last_load_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+WHERE last_load_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND status != 'Loaded'
+ORDER BY last_load_time DESC
+LIMIT 20""",
+    "copy_loads": """
+SELECT table_catalog_name AS database_name, table_schema_name AS schema_name,
+    table_name, COUNT(*) AS load_count, SUM(row_count) AS total_rows, SUM(file_size) AS total_bytes
+FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+WHERE last_load_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND status = 'Loaded'
+GROUP BY table_catalog_name, table_schema_name, table_name
+ORDER BY total_rows DESC
+LIMIT 20""",
+    "pipe_usage": """
+SELECT pipe_name, pipe_catalog_name AS database_name,
+    ROUND(SUM(credits_used), 2) AS credits, SUM(files_inserted) AS files
+FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY pipe_name, pipe_catalog_name
+ORDER BY credits DESC
+LIMIT 20""",
+}
+
+_TRANSFORMATION_QUERIES = {
+    "all": """
+SELECT name, database_name, schema_name, state, state_message, refresh_trigger,
+    ROUND(statistics:numInsertedRows, 0) AS rows_inserted,
+    DATEDIFF('second', refresh_start_time, refresh_end_time) AS duration_sec
+FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+WHERE refresh_start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+ORDER BY refresh_start_time DESC
+LIMIT 20""",
+    "failures": """
+SELECT name, database_name, schema_name, state, state_message, refresh_start_time, refresh_end_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+WHERE refresh_start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND state = 'FAILED'
+ORDER BY refresh_start_time DESC
+LIMIT 20""",
+    "slowest": """
+SELECT name, database_name, schema_name, COUNT(*) AS refresh_count,
+    ROUND(AVG(DATEDIFF('second', refresh_start_time, refresh_end_time)), 1) AS avg_duration_sec,
+    ROUND(MAX(DATEDIFF('second', refresh_start_time, refresh_end_time)), 1) AS max_duration_sec
+FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+WHERE refresh_start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND state = 'SUCCEEDED'
+GROUP BY name, database_name, schema_name
+ORDER BY avg_duration_sec DESC
+LIMIT 15""",
+    "upstream_failures": """
+SELECT name, database_name, schema_name, state, state_message, refresh_start_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+WHERE refresh_start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    AND state_message ILIKE '%upstream%'
+ORDER BY refresh_start_time DESC
+LIMIT 15""",
+}
+
+_STORAGE_QUERIES = {
+    "top_databases": """
+SELECT database_name,
+    ROUND(AVG(database_bytes) / POW(1024, 3), 2) AS avg_storage_gb,
+    ROUND(AVG(failsafe_bytes) / POW(1024, 3), 2) AS avg_failsafe_gb
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+WHERE usage_date >= DATEADD(DAY, -30, CURRENT_DATE())
+GROUP BY database_name
+ORDER BY avg_storage_gb DESC
+LIMIT 20""",
+    "top_tables": """
+SELECT table_catalog AS database_name, table_schema AS schema_name, table_name,
+    ROUND(active_bytes / POW(1024, 3), 2) AS active_gb,
+    ROUND(time_travel_bytes / POW(1024, 3), 2) AS time_travel_gb,
+    ROUND(failsafe_bytes / POW(1024, 3), 2) AS failsafe_gb
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
+WHERE active_bytes > 0
+ORDER BY active_bytes DESC
+LIMIT 20""",
+}
+
+_CONTAINER_QUERIES = {
+    "top_pools": """
+SELECT compute_pool_name,
+    ROUND(SUM(credits_used), 2) AS total_credits,
+    COUNT(DISTINCT instance_id) AS instance_count
+FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY compute_pool_name
+ORDER BY total_credits DESC
+LIMIT 20""",
+}
+
+_SERVERLESS_QUERIES = {
+    "top_tasks": """
+SELECT name, database_name, schema_name,
+    ROUND(SUM(credits_used), 2) AS total_credits,
+    COUNT(*) AS execution_count,
+    ROUND(AVG(credits_used), 4) AS avg_credits_per_run
+FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY name, database_name, schema_name
+ORDER BY total_credits DESC
+LIMIT 20""",
+}
+
+_DATA_TRANSFER_QUERY = """
+SELECT source_cloud, source_region, target_cloud, target_region,
+    ROUND(SUM(bytes_transferred) / POW(1024, 3), 2) AS gb_transferred,
+    ROUND(SUM(credits_used), 2) AS credits_used
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
+WHERE start_time >= DATEADD(DAY, -30, CURRENT_DATE())
+GROUP BY source_cloud, source_region, target_cloud, target_region
+ORDER BY credits_used DESC
+LIMIT 20"""
+
+_USER_QUERIES = {
+    "top_spenders": """
+SELECT user_name,
+    ROUND(SUM(credits_attributed_compute), 2) AS compute_credits,
+    COUNT(DISTINCT query_id) AS query_count,
+    ROUND(SUM(credits_attributed_compute) / NULLIF(COUNT(DISTINCT query_id), 0), 4) AS avg_credits_per_query
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    AND user_name IS NOT NULL
+GROUP BY user_name
+ORDER BY compute_credits DESC
+LIMIT 20""",
+    "by_warehouse": """
+SELECT user_name, warehouse_name,
+    ROUND(SUM(credits_attributed_compute), 2) AS compute_credits,
+    COUNT(DISTINCT query_id) AS query_count
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    AND user_name IS NOT NULL AND warehouse_name IS NOT NULL
+GROUP BY user_name, warehouse_name
+ORDER BY compute_credits DESC
+LIMIT 20""",
+}
+
+_COST_BREAKDOWN_QUERY = """
+SELECT service_type, ROUND(SUM(credits_used), 2) AS total_credits,
+    ROUND(SUM(credits_used) / SUM(SUM(credits_used)) OVER () * 100, 1) AS percentage_of_total
+FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+GROUP BY service_type
+ORDER BY total_credits DESC"""
+
+_ECOSYSTEM_ANOMALIES_QUERY = """
+WITH wow AS (
+    SELECT 'current_week' AS period, ROUND(IFNULL(SUM(credits_used), 0), 2) AS credits_used
+    FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+    WHERE start_time >= DATEADD(DAY, -7, CURRENT_DATE()) AND start_time < CURRENT_DATE()
+    UNION ALL
+    SELECT 'previous_week' AS period, ROUND(IFNULL(SUM(credits_used), 0), 2) AS credits_used
+    FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+    WHERE start_time >= DATEADD(DAY, -14, CURRENT_DATE()) AND start_time < DATEADD(DAY, -7, CURRENT_DATE())
+),
+service_breakdown AS (
+    SELECT service_type, ROUND(SUM(credits_used), 2) AS total_credits
+    FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
+    WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    GROUP BY service_type
+),
+top_warehouses AS (
+    SELECT warehouse_name, ROUND(SUM(credits_used), 2) AS credits
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE start_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP())
+    GROUP BY warehouse_name ORDER BY credits DESC LIMIT 5
+),
+failed_tasks AS (
+    SELECT COUNT(*) AS failed_count
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE scheduled_time >= DATEADD(HOUR, -{hours}, CURRENT_TIMESTAMP()) AND state = 'FAILED'
+)
+SELECT 'week_over_week' AS category, period AS item, credits_used AS value FROM wow
+UNION ALL SELECT 'service_breakdown', service_type, total_credits FROM service_breakdown
+UNION ALL SELECT 'top_warehouses', warehouse_name, credits FROM top_warehouses
+UNION ALL SELECT 'failed_tasks', 'total_failures', failed_count FROM failed_tasks"""
 
 
-def _limit(val, default: int = 20) -> int:
-    return int(val) if val else default
+def _hours_to_days(hours: int) -> int:
+    return max(1, hours // 24)
 
 
 def execute_tool(name: str, inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    executors = {
-        "query_task_health": _task_health,
-        "query_warehouse_efficiency": _warehouse_efficiency,
-        "query_performance": _query_performance,
-        "query_ingestion_health": _ingestion_health,
-        "query_transformation_health": _transformation_health,
-        "query_cost_breakdown": _cost_breakdown,
-        "query_ecosystem_anomalies": _ecosystem_anomalies,
-    }
-    return executors[name](inputs, session)
-
-
-# ── Tool executors ─────────────────────────────────────────────────────────────
-
-def _task_health(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-    lim = _limit(inputs.get("limit"), 20)
+    hours = inputs.get("time_window_hours", 24)
     focus = inputs.get("focus", "all")
+    days = _hours_to_days(hours)
+    prior_days = days * 2
 
-    if focus == "failures":
-        sql = f"""
-            SELECT NAME AS task_name,
-                   COUNT(*) AS total_runs,
-                   COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED')) AS failed_runs,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED'))
-                         / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct,
-                   MAX(ERROR_MESSAGE) AS last_error
-            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-            WHERE SCHEDULED_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY NAME
-            HAVING failed_runs > 0
-            ORDER BY failure_rate_pct DESC
-            LIMIT {lim}
-        """
-        desc = f"Top failing tasks in the last {h}h"
-    elif focus == "duration":
-        sql = f"""
-            SELECT NAME AS task_name,
-                   COUNT(*) AS total_runs,
-                   ROUND(AVG(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)), 1) AS avg_duration_seconds,
-                   MAX(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)) AS max_duration_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-            WHERE SCHEDULED_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND STATE = 'SUCCEEDED'
-              AND COMPLETED_TIME IS NOT NULL
-            GROUP BY NAME
-            ORDER BY avg_duration_seconds DESC
-            LIMIT {lim}
-        """
-        desc = f"Slowest tasks by avg duration in the last {h}h"
-    elif focus == "flaky":
-        sql = f"""
-            SELECT NAME AS task_name,
-                   COUNT_IF(STATE = 'SUCCEEDED') AS successful_runs,
-                   COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED')) AS failed_runs,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED'))
-                         / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-            WHERE SCHEDULED_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY NAME
-            HAVING successful_runs > 0 AND failed_runs > 0
-            ORDER BY failure_rate_pct DESC
-            LIMIT {lim}
-        """
-        desc = f"Intermittently failing (flaky) tasks in the last {h}h"
+    if name == "query_warehouse_efficiency":
+        sql = _WAREHOUSE_QUERIES.get(focus, _WAREHOUSE_QUERIES["most_expensive"]).format(days=days, prior_days=prior_days)
+        desc = f"Warehouse credits ({focus}) - last {days}d"
+    elif name == "query_performance":
+        sql = _PERFORMANCE_QUERIES.get(focus, _PERFORMANCE_QUERIES["all"]).format(hours=hours)
+        desc = f"Query performance ({focus}) - last {hours}h"
+    elif name == "query_task_health":
+        sql = _TASK_HEALTH_QUERIES.get(focus, _TASK_HEALTH_QUERIES["failures"]).format(hours=hours)
+        desc = f"Task health ({focus}) - last {hours}h"
+    elif name == "query_ingestion_health":
+        sql = _INGESTION_QUERIES.get(focus, _INGESTION_QUERIES["all"]).format(hours=hours)
+        desc = f"Ingestion ({focus}) - last {hours}h"
+    elif name == "query_transformation_health":
+        sql = _TRANSFORMATION_QUERIES.get(focus, _TRANSFORMATION_QUERIES["all"]).format(hours=hours)
+        desc = f"Dynamic tables ({focus}) - last {hours}h"
+    elif name == "query_cost_breakdown":
+        sql = _COST_BREAKDOWN_QUERY.format(hours=hours)
+        desc = f"Cost breakdown by service - last {hours}h"
+    elif name == "query_ecosystem_anomalies":
+        sql = _ECOSYSTEM_ANOMALIES_QUERY.format(hours=hours)
+        desc = f"Ecosystem overview - last {hours}h"
+    elif name == "query_storage":
+        sql = _STORAGE_QUERIES.get(focus, _STORAGE_QUERIES["top_databases"])
+        desc = f"Storage ({focus})"
+    elif name == "query_containers":
+        sql = _CONTAINER_QUERIES.get(focus, _CONTAINER_QUERIES["top_pools"]).format(hours=hours)
+        desc = f"Containers ({focus})"
+    elif name == "query_serverless":
+        sql = _SERVERLESS_QUERIES.get(focus, _SERVERLESS_QUERIES["top_tasks"]).format(hours=hours)
+        desc = f"Serverless tasks ({focus})"
+    elif name == "query_data_transfer":
+        sql = _DATA_TRANSFER_QUERY
+        desc = "Data transfer by region"
+    elif name == "query_users":
+        sql = _USER_QUERIES.get(focus, _USER_QUERIES["top_spenders"]).format(hours=hours)
+        desc = f"User spending ({focus})"
     else:
-        sql = f"""
-            SELECT NAME AS task_name,
-                   COUNT(*) AS total_runs,
-                   COUNT_IF(STATE = 'SUCCEEDED') AS succeeded,
-                   COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED')) AS failed,
-                   COUNT_IF(STATE = 'FAILED_AND_AUTO_SUSPENDED') AS auto_suspended,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED'))
-                         / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct,
-                   ROUND(AVG(DATEDIFF('second', SCHEDULED_TIME, COMPLETED_TIME)), 1) AS avg_duration_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-            WHERE SCHEDULED_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY NAME
-            ORDER BY failed DESC, failure_rate_pct DESC
-            LIMIT {lim}
-        """
-        desc = f"Task execution overview for the last {h}h"
+        raise ValueError(f"Unknown tool: {name}")
 
-    return session.sql(sql).to_pandas(), desc
-
-
-def _warehouse_efficiency(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-    lim = _limit(inputs.get("limit"), 20)
-    focus = inputs.get("focus", "all")
-
-    if focus == "most_expensive":
-        sql = f"""
-            SELECT WAREHOUSE_NAME,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   ROUND(AVG(CREDITS_USED), 4) AS avg_credits_per_hour,
-                   COUNT(*) AS active_hours
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY WAREHOUSE_NAME
-            ORDER BY total_credits DESC
-            LIMIT {lim}
-        """
-        desc = f"Most expensive warehouses by credit consumption in the last {h}h"
-    elif focus == "idle":
-        sql = f"""
-            SELECT WAREHOUSE_NAME,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   COUNT(*) AS active_hours,
-                   ROUND(AVG(CREDITS_USED), 4) AS avg_credits_per_hour
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY WAREHOUSE_NAME
-            HAVING total_credits < 0.5
-            ORDER BY total_credits ASC
-            LIMIT {lim}
-        """
-        desc = f"Underutilized (near-idle) warehouses in the last {h}h"
-    elif focus == "trend":
-        sql = f"""
-            SELECT START_TIME::DATE AS metering_date,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   COUNT(DISTINCT WAREHOUSE_NAME) AS active_warehouses
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY metering_date
-            ORDER BY metering_date ASC
-        """
-        desc = f"Daily credit consumption trend over the last {h}h"
-    else:
-        sql = f"""
-            SELECT WAREHOUSE_NAME,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   ROUND(SUM(CREDITS_USED_COMPUTE), 4) AS compute_credits,
-                   ROUND(SUM(CREDITS_USED_CLOUD_SERVICES), 4) AS cloud_service_credits,
-                   COUNT(*) AS active_hours,
-                   ROUND(AVG(CREDITS_USED), 4) AS avg_credits_per_hour
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY WAREHOUSE_NAME
-            ORDER BY total_credits DESC
-            LIMIT {lim}
-        """
-        desc = f"Warehouse credit consumption overview for the last {h}h"
-
-    return session.sql(sql).to_pandas(), desc
-
-
-def _query_performance(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-    lim = _limit(inputs.get("limit"), 20)
-    focus = inputs.get("focus", "all")
-
-    if focus == "slowest":
-        sql = f"""
-            SELECT QUERY_ID, WAREHOUSE_NAME, USER_NAME, QUERY_TYPE,
-                   ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds,
-                   ROUND(BYTES_SCANNED / 1073741824.0, 2) AS gb_scanned,
-                   EXECUTION_STATUS
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND QUERY_TYPE NOT IN ('SHOW','DESCRIBE','USE')
-            ORDER BY TOTAL_ELAPSED_TIME DESC
-            LIMIT {lim}
-        """
-        desc = f"Slowest queries in the last {h}h"
-    elif focus == "most_data_scanned":
-        sql = f"""
-            SELECT QUERY_ID, WAREHOUSE_NAME, USER_NAME,
-                   ROUND(BYTES_SCANNED / 1073741824.0, 2) AS gb_scanned,
-                   ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds,
-                   PARTITIONS_SCANNED, PARTITIONS_TOTAL
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND BYTES_SCANNED > 0
-            ORDER BY BYTES_SCANNED DESC
-            LIMIT {lim}
-        """
-        desc = f"Queries scanning the most data in the last {h}h"
-    elif focus == "failed":
-        sql = f"""
-            SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, QUERY_TYPE,
-                   ERROR_CODE, ERROR_MESSAGE,
-                   ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND EXECUTION_STATUS = 'FAIL'
-            ORDER BY START_TIME DESC
-            LIMIT {lim}
-        """
-        desc = f"Failed queries in the last {h}h"
-    elif focus == "cache_misses":
-        sql = f"""
-            SELECT WAREHOUSE_NAME,
-                   COUNT(*) AS total_queries,
-                   COUNT_IF(PERCENTAGE_SCANNED_FROM_CACHE < 0.5) AS cache_miss_queries,
-                   ROUND(AVG(PERCENTAGE_SCANNED_FROM_CACHE) * 100, 1) AS avg_cache_hit_pct,
-                   ROUND(SUM(BYTES_SCANNED) / 1073741824.0, 2) AS total_gb_scanned
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND BYTES_SCANNED > 0
-            GROUP BY WAREHOUSE_NAME
-            ORDER BY cache_miss_queries DESC
-            LIMIT {lim}
-        """
-        desc = f"Cache miss analysis by warehouse in the last {h}h"
-    else:
-        sql = f"""
-            SELECT QUERY_ID,
-                   WAREHOUSE_NAME,
-                   USER_NAME,
-                   QUERY_TYPE,
-                   ROUND(TOTAL_ELAPSED_TIME / 1000, 2) AS duration_seconds,
-                   ROUND(BYTES_SCANNED / 1073741824.0, 2) AS gb_scanned,
-                   ROUND(PERCENTAGE_SCANNED_FROM_CACHE * 100, 1) AS cache_hit_pct,
-                   EXECUTION_STATUS
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND QUERY_TYPE NOT IN ('SHOW','DESCRIBE','USE')
-            ORDER BY TOTAL_ELAPSED_TIME DESC
-            LIMIT {lim}
-        """
-        desc = f"Slowest individual queries in the last {h}h"
-
-    return session.sql(sql).to_pandas(), desc
-
-
-def _ingestion_health(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-    lim = _limit(inputs.get("limit"), 20)
-    focus = inputs.get("focus", "all")
-
-    if focus == "pipe_usage":
-        sql = f"""
-            SELECT PIPE_NAME,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   SUM(BYTES_INSERTED) AS total_bytes_inserted,
-                   SUM(FILES_INSERTED) AS total_files_inserted,
-                   ROUND(AVG(CREDITS_USED / NULLIF(FILES_INSERTED, 0)), 6) AS avg_credits_per_file
-            FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY PIPE_NAME
-            ORDER BY total_credits DESC
-            LIMIT {lim}
-        """
-        desc = f"Snowpipe credit and volume usage for the last {h}h"
-    elif focus == "copy_loads":
-        sql = f"""
-            SELECT TABLE_CATALOG_NAME AS database_name,
-                   TABLE_SCHEMA_NAME AS schema_name,
-                   TABLE_NAME,
-                   PIPE_NAME,
-                   COUNT(*) AS total_loads,
-                   COUNT_IF(STATUS = 'Loaded') AS successful_loads,
-                   COUNT_IF(STATUS NOT IN ('Loaded','Copy already done')) AS failed_loads,
-                   SUM(ROW_COUNT) AS total_rows_loaded
-            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
-            WHERE LAST_LOAD_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY 1,2,3,4
-            ORDER BY failed_loads DESC, total_loads DESC
-            LIMIT {lim}
-        """
-        desc = f"COPY INTO load history for the last {h}h"
-    elif focus == "failed_loads":
-        sql = f"""
-            SELECT TABLE_NAME, PIPE_NAME, STAGE_LOCATION,
-                   STATUS, ERROR_COUNT, ERROR_LIMIT,
-                   LAST_LOAD_TIME
-            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
-            WHERE LAST_LOAD_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND STATUS NOT IN ('Loaded','Copy already done','Loading')
-            ORDER BY LAST_LOAD_TIME DESC
-            LIMIT {lim}
-        """
-        desc = f"Failed data loads in the last {h}h"
-    else:
-        sql = f"""
-            SELECT 'Snowpipe' AS ingestion_type,
-                   PIPE_NAME AS source,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   SUM(BYTES_INSERTED) AS bytes_processed,
-                   SUM(FILES_INSERTED) AS unit_count,
-                   0 AS failed_units
-            FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY PIPE_NAME
-            UNION ALL
-            SELECT 'COPY INTO' AS ingestion_type,
-                   TABLE_NAME AS source,
-                   NULL AS total_credits,
-                   SUM(ROW_COUNT) AS bytes_processed,
-                   COUNT(*) AS unit_count,
-                   COUNT_IF(STATUS NOT IN ('Loaded','Copy already done')) AS failed_units
-            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
-            WHERE LAST_LOAD_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY TABLE_NAME
-            ORDER BY ingestion_type, total_credits DESC NULLS LAST
-            LIMIT {lim}
-        """
-        desc = f"Data ingestion overview (Snowpipe + COPY INTO) for the last {h}h"
-
-    return session.sql(sql).to_pandas(), desc
-
-
-def _transformation_health(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-    lim = _limit(inputs.get("limit"), 20)
-    focus = inputs.get("focus", "all")
-
-    if focus == "failures":
-        sql = f"""
-            SELECT NAME AS table_name,
-                   DATABASE_NAME, SCHEMA_NAME,
-                   STATE, REFRESH_ACTION,
-                   REFRESH_START_TIME, REFRESH_END_TIME,
-                   DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME) AS duration_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-            WHERE REFRESH_START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND STATE IN ('FAILED','CANCELLED')
-            ORDER BY REFRESH_START_TIME DESC
-            LIMIT {lim}
-        """
-        desc = f"Failed dynamic table refreshes in the last {h}h"
-    elif focus == "upstream_failures":
-        sql = f"""
-            SELECT NAME AS table_name,
-                   DATABASE_NAME, SCHEMA_NAME,
-                   COUNT(*) AS upstream_failed_refreshes,
-                   MAX(REFRESH_START_TIME) AS last_upstream_failure
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-            WHERE REFRESH_START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND STATE = 'UPSTREAM_FAILED'
-            GROUP BY 1,2,3
-            ORDER BY upstream_failed_refreshes DESC
-            LIMIT {lim}
-        """
-        desc = f"Dynamic tables blocked by upstream failures in the last {h}h"
-    elif focus == "slowest":
-        sql = f"""
-            SELECT NAME AS table_name,
-                   DATABASE_NAME, SCHEMA_NAME,
-                   COUNT(*) AS total_refreshes,
-                   ROUND(AVG(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)), 1) AS avg_refresh_seconds,
-                   MAX(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)) AS max_refresh_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-            WHERE REFRESH_START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND STATE = 'SUCCEEDED'
-              AND REFRESH_END_TIME IS NOT NULL
-            GROUP BY 1,2,3
-            ORDER BY avg_refresh_seconds DESC
-            LIMIT {lim}
-        """
-        desc = f"Slowest dynamic table refreshes in the last {h}h"
-    else:
-        sql = f"""
-            SELECT NAME AS table_name,
-                   DATABASE_NAME, SCHEMA_NAME,
-                   COUNT(*) AS total_refreshes,
-                   COUNT_IF(STATE = 'SUCCEEDED') AS succeeded,
-                   COUNT_IF(STATE IN ('FAILED','CANCELLED')) AS failed,
-                   COUNT_IF(STATE = 'UPSTREAM_FAILED') AS upstream_failed,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','CANCELLED'))
-                         / NULLIF(COUNT(*), 0) * 100, 2) AS failure_rate_pct,
-                   ROUND(AVG(DATEDIFF('second', REFRESH_START_TIME, REFRESH_END_TIME)), 1) AS avg_refresh_seconds
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-            WHERE REFRESH_START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY 1,2,3
-            ORDER BY failed DESC, failure_rate_pct DESC
-            LIMIT {lim}
-        """
-        desc = f"Dynamic table refresh overview for the last {h}h"
-
-    return session.sql(sql).to_pandas(), desc
-
-
-def _cost_breakdown(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 168)
-
-    sql = f"""
-        WITH warehouse_costs AS (
-            SELECT 'Compute (Warehouses)' AS cost_category,
-                   WAREHOUSE_NAME AS resource_name,
-                   ROUND(SUM(CREDITS_USED), 4) AS total_credits,
-                   NULL AS bytes_transferred
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY WAREHOUSE_NAME
-        ),
-        transfer_costs AS (
-            SELECT 'Data Transfer' AS cost_category,
-                   COALESCE(TARGET_CLOUD || ' (' || TARGET_REGION || ')', 'Unknown') AS resource_name,
-                   NULL AS total_credits,
-                   SUM(BYTES_TRANSFERRED) AS bytes_transferred
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-            GROUP BY 2
-        )
-        SELECT * FROM warehouse_costs
-        UNION ALL
-        SELECT * FROM transfer_costs
-        ORDER BY cost_category, total_credits DESC NULLS LAST
-    """
-    return session.sql(sql).to_pandas(), f"Cross-domain cost breakdown for the last {h}h"
-
-
-def _ecosystem_anomalies(inputs: dict, session) -> tuple[pd.DataFrame, str]:
-    h = _hours(inputs.get("time_window_hours"), 24)
-
-    sql = f"""
-        WITH task_signals AS (
-            SELECT 'Task Failures' AS signal,
-                   COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED')) AS event_count,
-                   COUNT(*) AS total,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','FAILED_AND_AUTO_SUSPENDED'))
-                         / NULLIF(COUNT(*), 0) * 100, 1) AS rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-            WHERE SCHEDULED_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-        ),
-        warehouse_signals AS (
-            SELECT 'Credit Consumption' AS signal,
-                   ROUND(SUM(CREDITS_USED), 2) AS event_count,
-                   COUNT(DISTINCT WAREHOUSE_NAME) AS total,
-                   ROUND(AVG(CREDITS_USED), 4) AS rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-        ),
-        query_signals AS (
-            SELECT 'Query Failures' AS signal,
-                   COUNT_IF(EXECUTION_STATUS = 'FAIL') AS event_count,
-                   COUNT(*) AS total,
-                   ROUND(COUNT_IF(EXECUTION_STATUS = 'FAIL')
-                         / NULLIF(COUNT(*), 0) * 100, 1) AS rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-              AND QUERY_TYPE NOT IN ('SHOW','DESCRIBE','USE')
-        ),
-        copy_signals AS (
-            SELECT 'Load Failures' AS signal,
-                   COUNT_IF(STATUS NOT IN ('Loaded','Copy already done')) AS event_count,
-                   COUNT(*) AS total,
-                   ROUND(COUNT_IF(STATUS NOT IN ('Loaded','Copy already done'))
-                         / NULLIF(COUNT(*), 0) * 100, 1) AS rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
-            WHERE LAST_LOAD_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-        ),
-        dt_signals AS (
-            SELECT 'Dynamic Table Failures' AS signal,
-                   COUNT_IF(STATE IN ('FAILED','CANCELLED','UPSTREAM_FAILED')) AS event_count,
-                   COUNT(*) AS total,
-                   ROUND(COUNT_IF(STATE IN ('FAILED','CANCELLED','UPSTREAM_FAILED'))
-                         / NULLIF(COUNT(*), 0) * 100, 1) AS rate_pct
-            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-            WHERE REFRESH_START_TIME >= DATEADD('hour', -{h}, CURRENT_TIMESTAMP())
-        )
-        SELECT signal, event_count, total, rate_pct
-        FROM task_signals
-        UNION ALL SELECT * FROM warehouse_signals
-        UNION ALL SELECT * FROM query_signals
-        UNION ALL SELECT * FROM copy_signals
-        UNION ALL SELECT * FROM dt_signals
-        ORDER BY event_count DESC
-    """
-    return session.sql(sql).to_pandas(), f"Cross-ecosystem health signals for the last {h}h"
+    df = session.sql(sql).to_pandas()
+    return df, desc
