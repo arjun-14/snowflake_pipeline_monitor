@@ -4,6 +4,8 @@
 
 A Streamlit-in-Snowflake app that answers plain-English questions about your Snowflake data platform. Ask about pipeline failures, warehouse costs, slow queries, bill spikes, or ingestion health and get back live charts, data tables, and an AI-generated analysis with specific numbers and actionable recommendations.
 
+Read the write-up: [I Built a Snowflake Analyst That Actually Investigates Questions](https://medium.com/@arjun14081999/i-built-a-snowflake-analyst-that-actually-investigates-questions-566774b1a750)
+
 ## How it works
 
 The app uses a 3-tier architecture with automatic fallback:
